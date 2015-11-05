@@ -262,7 +262,21 @@ func analisysNSInclude(baseurl string, ce *ast.CallExpr) string {
 	return cname
 }
 
+var topPath string;
+
+func setTopPath(pkgpath string) {
+	curntPath, _ := os.Getwd()
+	deep := len(strings.Split(pkgpath, "/"))
+	for i := 0; i < deep-1; i++ {
+		curntPath = path.Join(curntPath, "..")
+	}
+	topPath = curntPath
+//	println(pkgpath, "topath is ", topPath)
+}
+
 func analisyscontrollerPkg(localName, pkgpath string) {
+	setTopPath(pkgpath)
+
 	pkgpath = strings.Trim(pkgpath, "\"")
 	if isSystemPackage(pkgpath) {
 		return
@@ -315,7 +329,7 @@ func analisyscontrollerPkg(localName, pkgpath string) {
 				case *ast.FuncDecl:
 					if specDecl.Recv != nil && len(specDecl.Recv.List) > 0 {
 						if t, ok := specDecl.Recv.List[0].Type.(*ast.StarExpr); ok {
-							parserComments(specDecl.Doc, specDecl.Name.String(), fmt.Sprint(t.X), pkgpath)
+							parserComments(specDecl.Doc, specDecl.Name.String(), fmt.Sprint(t.X), pkgpath, fl)
 						}
 					}
 				case *ast.GenDecl:
@@ -354,7 +368,7 @@ func isSystemPackage(pkgpath string) bool {
 }
 
 // parse the func comments
-func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpath string) error {
+func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpath string, fl *ast.File) error {
 	innerapi := swagger.Api{}
 	opts := swagger.Operation{}
 	if comments != nil && comments.List != nil {
@@ -413,7 +427,7 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 					if st[2] == "" {
 						panic(controllerName + " " + funcName + " has no object")
 					}
-					cmpath, m, mod, realTypes := getModel(st[2])
+					cmpath, m, mod, realTypes := getModel(st[2], fl, pkgpath)
 					//ll := strings.Split(st[2], ".")
 					//opts.Type = ll[len(ll)-1]
 					rs.ResponseModel = m
@@ -421,7 +435,7 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 						modelsList[pkgpath+controllerName] = make(map[string]swagger.Model, 0)
 					}
 					modelsList[pkgpath+controllerName][st[2]] = mod
-					appendModels(cmpath, pkgpath, controllerName, realTypes)
+					appendModels(cmpath, pkgpath, controllerName, realTypes, fl)
 				}
 
 				rs.Code, _ = strconv.Atoi(st[0])
@@ -528,12 +542,33 @@ func getparams(str string) []string {
 	return r
 }
 
-func getModel(str string) (pkgpath, objectname string, m swagger.Model, realTypes []string) {
+func getModelPath(modelName string, sourceFile *ast.File, sourceFilePkg string) string {
+	strs := strings.Split(modelName, ".")
+	if len(strs) == 1 {
+		return sourceFilePkg
+	}
+	for _, importPath := range sourceFile.Imports {
+		path := strings.Replace(importPath.Path.Value, "\"", "", -1)
+//		println("scan " + importPath.Path.Value)
+		paths := strings.Split(path, "/")
+//		println(paths[len(paths)-1], strs[0])
+		if paths[len(paths)-1] == strs[0] {
+			return path
+		}
+	}
+	panic("can't find import path for model " + modelName + " ,source file pkg " + sourceFilePkg)
+}
+
+func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, objectname string, m swagger.Model, realTypes []string) {
 	strs := strings.Split(str, ".")
 	objectname = strs[len(strs)-1]
 	pkgpath = strings.Join(strs[:len(strs)-1], "/")
-	curpath, _ := os.Getwd()
-	pkgRealpath := path.Join(curpath, pkgpath)
+
+//	println("----------pkgpath", pkgpath)
+//	curpath, _ := os.Getwd()
+//	pkgRealpath := path.Join(curpath, pkgpath)
+	pkgRealpath := path.Join(topPath, getModelPath(str, sourceFile, sourceFilePkg))
+//	println("---pkgrealpath", pkgRealpath)
 	fileSet := token.NewFileSet()
 	astPkgs, err := parser.ParseDir(fileSet, pkgRealpath, func(info os.FileInfo) bool {
 		name := info.Name()
@@ -541,6 +576,7 @@ func getModel(str string) (pkgpath, objectname string, m swagger.Model, realType
 	}, parser.ParseComments)
 
 	if err != nil {
+		println("----------", pkgRealpath)
 		ColorLog("[ERRO] the model %s parser.ParseDir error\n", str)
 		os.Exit(1)
 	}
@@ -695,7 +731,7 @@ func grepJsonTag(tag string) string {
 }
 
 // append models
-func appendModels(cmpath, pkgpath, controllerName string, realTypes []string) {
+func appendModels(cmpath, pkgpath, controllerName string, realTypes []string, fl *ast.File) {
 	var p string
 	if cmpath != "" {
 		p = strings.Join(strings.Split(cmpath, "/"), ".") + "."
@@ -709,9 +745,13 @@ func appendModels(cmpath, pkgpath, controllerName string, realTypes []string) {
 				continue
 			}
 			//fmt.Printf(pkgpath + ":" + controllerName + ":" + cmpath + ":" + realType + "\n")
-			_, _, mod, newRealTypes := getModel(p + realType)
+			_, _, mod, newRealTypes := getModel(p + realType, fl, pkgpath)
 			modelsList[pkgpath+controllerName][p+realType] = mod
-			appendModels(cmpath, pkgpath, controllerName, newRealTypes)
+			appendModels(cmpath, pkgpath, controllerName, newRealTypes, fl)
 		}
 	}
+}
+
+func getFilePath(f *ast.File) string {
+	return "";
 }
