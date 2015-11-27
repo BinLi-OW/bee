@@ -457,6 +457,26 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 					para.Description = p[3]
 				}
 				opts.Parameters = append(opts.Parameters, para)
+
+				//dapeng: append request model
+				st := cutRequestMessage(t)
+				if st[1] == "body" {
+					if st[2] == "" {
+						panic(controllerName + " " + funcName + " has no object")
+					}
+					if st[2] == "string" || st[2] == "true" {
+						continue
+					}
+					cmpath, _, mod, realTypes := getModel(st[2], fl, pkgpath)
+					//ll := strings.Split(st[2], ".")
+					//opts.Type = ll[len(ll)-1]
+					if _, ok := modelsList[pkgpath+controllerName]; !ok {
+						modelsList[pkgpath+controllerName] = make(map[string]swagger.Model, 0)
+					}
+					modelsList[pkgpath+controllerName][st[2]] = mod
+					appendModels(cmpath, pkgpath, controllerName, realTypes, fl)
+				}
+
 			} else if strings.HasPrefix(t, "@Failure") {
 				rs := swagger.ResponseMessage{}
 				st := strings.TrimSpace(t[len("@Failure"):])
@@ -672,7 +692,7 @@ func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, 
 		}
 	}
 	if m.Id == "" {
-		ColorLog("can't find the object: %v", str)
+		ColorLog("can't find the object: %v in file %v", str, sourceFile.Package)
 		os.Exit(1)
 	}
 	return
@@ -754,4 +774,45 @@ func appendModels(cmpath, pkgpath, controllerName string, realTypes []string, fl
 
 func getFilePath(f *ast.File) string {
 	return "";
+}
+
+func cutRequestMessage(t string) []string {
+	ss := strings.TrimSpace(t[len("@Success"):])
+	st := make([]string, 3)
+	j := 0
+	var tmp []rune
+	start := false
+
+	for i, c := range ss {
+		if unicode.IsSpace(c) {
+			if !start && j < 2 {
+				continue
+			}
+			if j == 0 || j == 1 {
+				st[j] = string(tmp)
+				tmp = make([]rune, 0)
+				j += 1
+				start = false
+				continue
+			} else {
+				st[j] = strings.TrimSpace(ss[i+1:])
+				break
+			}
+		} else {
+			start = true
+			tmp = append(tmp, c)
+		}
+	}
+	if len(tmp) > 0 && st[2] == "" {
+		st[2] = strings.TrimSpace(string(tmp))
+	}
+
+	if strings.Index(st[2], " ") >= 0 {
+		st[2] = st[2][0:strings.Index(st[2], " ")]
+	}
+	if strings.Index(st[2], "	") >= 0 {
+		st[2] = st[2][0:strings.Index(st[2], "	")]
+	}
+	// println("st2 is ", st[2])
+	return st
 }
