@@ -264,13 +264,17 @@ func analisysNSInclude(baseurl string, ce *ast.CallExpr) string {
 
 var topPath string;
 
+//dapeng 找到src 目录
 func setTopPath(pkgpath string) {
 	curntPath, _ := os.Getwd()
-	deep := len(strings.Split(pkgpath, "/"))
-	for i := 0; i < deep-1; i++ {
-		curntPath = path.Join(curntPath, "..")
-	}
+	index := strings.Index(curntPath, "src/")
+	curntPath = curntPath[0:index+4]
+//	deep := len(strings.Split(pkgpath, "/"))
+//	for i := 0; i < deep-1; i++ {
+//		curntPath = path.Join(curntPath, "..")
+//	}
 	topPath = curntPath
+	// println("top path is", topPath)
 //	println(pkgpath, "topath is ", topPath)
 }
 
