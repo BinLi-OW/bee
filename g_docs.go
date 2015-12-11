@@ -97,6 +97,7 @@ const (
 	axml   = "application/xml"
 	aplain = "text/plain"
 	ahtml  = "text/html"
+	MAX_ANONYMOUS_LEVEL = 30
 )
 
 var pkgCache map[string]bool //pkg:controller:function:comments comments: key:value
@@ -262,20 +263,20 @@ func analisysNSInclude(baseurl string, ce *ast.CallExpr) string {
 	return cname
 }
 
-var topPath string;
+var topPath string
 
 //dapeng 找到src 目录
 func setTopPath(pkgpath string) {
 	curntPath, _ := os.Getwd()
 	index := strings.Index(curntPath, "src/")
-	curntPath = curntPath[0:index+4]
-//	deep := len(strings.Split(pkgpath, "/"))
-//	for i := 0; i < deep-1; i++ {
-//		curntPath = path.Join(curntPath, "..")
-//	}
+	curntPath = curntPath[0 : index+4]
+	//	deep := len(strings.Split(pkgpath, "/"))
+	//	for i := 0; i < deep-1; i++ {
+	//		curntPath = path.Join(curntPath, "..")
+	//	}
 	topPath = curntPath
 	// println("top path is", topPath)
-//	println(pkgpath, "topath is ", topPath)
+	//	println(pkgpath, "topath is ", topPath)
 }
 
 func analisyscontrollerPkg(localName, pkgpath string) {
@@ -573,9 +574,9 @@ func getModelPath(modelName string, sourceFile *ast.File, sourceFilePkg string) 
 	}
 	for _, importPath := range sourceFile.Imports {
 		path := strings.Replace(importPath.Path.Value, "\"", "", -1)
-//		println("scan " + importPath.Path.Value)
+		//		println("scan " + importPath.Path.Value)
 		paths := strings.Split(path, "/")
-//		println(paths[len(paths)-1], strs[0])
+		//		println(paths[len(paths)-1], strs[0])
 		if paths[len(paths)-1] == strs[0] {
 			return path
 		}
@@ -587,18 +588,28 @@ func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, 
 	strs := strings.Split(str, ".")
 	objectname = strs[len(strs)-1]
 	pkgpath = strings.Join(strs[:len(strs)-1], "/")
+	getInternalModel(str, sourceFile, sourceFilePkg, &m, realTypes, true, "", 0)
+	return
+}
 
-//	println("----------pkgpath", pkgpath)
-//	curpath, _ := os.Getwd()
-//	pkgRealpath := path.Join(curpath, pkgpath)
-	pkgRealpath := path.Join(topPath, getModelPath(str, sourceFile, sourceFilePkg))
-//	println("---pkgrealpath", pkgRealpath)
+func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m *swagger.Model, realTypes []string, isRoot bool, pkgRealpath string, level int) {
+	if level > MAX_ANONYMOUS_LEVEL {
+		panic("exceed anonymous level, there are ")
+	}
+	strs := strings.Split(str, ".")
+	objectname := strs[len(strs)-1]
+	pkgpath := strings.Join(strs[:len(strs)-1], "/")
+
+	if pkgRealpath == "" {
+		pkgRealpath = path.Join(topPath, getModelPath(str, sourceFile, sourceFilePkg))
+	}
 	fileSet := token.NewFileSet()
 	astPkgs, err := parser.ParseDir(fileSet, pkgRealpath, func(info os.FileInfo) bool {
 		name := info.Name()
 		return !info.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".go")
 	}, parser.ParseComments)
 
+	Debugf(fmt.Sprintf("isRoot: %s, objectname: %s, pkgpath: %s, pkgRealpath: %s", strconv.FormatBool(isRoot), objectname, pkgpath, pkgRealpath))
 	if err != nil {
 		println("----------", pkgRealpath)
 		ColorLog("[ERRO] the model %s parser.ParseDir error\n", str)
@@ -608,6 +619,7 @@ func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, 
 	for _, pkg := range astPkgs {
 		for _, fl := range pkg.Files {
 			for k, d := range fl.Scope.Objects {
+				// println(fmt.Sprintf("Scan %s, %s, %s", pkg.Name, fl.Name, k))
 				if d.Kind == ast.Typ {
 					if k != objectname {
 						continue
@@ -621,7 +633,9 @@ func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, 
 					if !ok {
 						continue
 					}
-					m.Id = k
+					if isRoot {
+						m.Id = k
+					}
 					if st.Fields.List != nil {
 						m.Properties = make(map[string]swagger.ModelProperty)
 						for _, field := range st.Fields.List {
@@ -641,7 +655,7 @@ func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, 
 								mp.Type = realType
 							}
 
-							// dont add property if anonymous field
+							// not anonymous field
 							if field.Names != nil {
 
 								// set property name as field name
@@ -683,9 +697,29 @@ func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, 
 									}
 
 									m.Properties[name] = mp
+									// println("add property: ", name)
 								}
 								if ignore := stag.Get("ignore"); ignore != "" {
 									continue
+								}
+							}else {
+								// prorcess anonymous field
+								pair := strings.FieldsFunc(realType, func(char rune) bool {
+									return char == '&' || char == '{' || char == '}' || char == ' '
+								})
+								if len(pair) != 1 && len(pair) != 2 {
+									panic(fmt.Sprintf("anonymous field must declared with package name and type name: %s", realType))
+									continue
+								}
+								var objectType string
+								if len(pair) == 2 {
+									objectType = pair[0] + "." + pair[1]
+									// println(fmt.Sprintf("processing anonymous field: %s", realType))
+									getInternalModel(objectType, sourceFile, sourceFilePkg, m, realTypes, false, "", level + 1)
+								}else{
+									objectType = pair[0]
+									// println(fmt.Sprintf("processing anonymous field: %s", realType))
+									getInternalModel(objectType, sourceFile, sourceFilePkg, m, realTypes, false, pkgRealpath, level + 1)
 								}
 							}
 						}
@@ -696,6 +730,7 @@ func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, 
 		}
 	}
 	if m.Id == "" {
+		fmt.Println(fmt.Sprintf("ERROR: can't find the object: %s in file %s", str, sourceFile.Package))
 		ColorLog("can't find the object: %v in file %v", str, sourceFile.Package)
 		os.Exit(1)
 	}
@@ -769,7 +804,7 @@ func appendModels(cmpath, pkgpath, controllerName string, realTypes []string, fl
 				continue
 			}
 			//fmt.Printf(pkgpath + ":" + controllerName + ":" + cmpath + ":" + realType + "\n")
-			_, _, mod, newRealTypes := getModel(p + realType, fl, pkgpath)
+			_, _, mod, newRealTypes := getModel(p+realType, fl, pkgpath)
 			modelsList[pkgpath+controllerName][p+realType] = mod
 			appendModels(cmpath, pkgpath, controllerName, newRealTypes, fl)
 		}
@@ -777,7 +812,7 @@ func appendModels(cmpath, pkgpath, controllerName string, realTypes []string, fl
 }
 
 func getFilePath(f *ast.File) string {
-	return "";
+	return ""
 }
 
 func cutRequestMessage(t string) []string {
