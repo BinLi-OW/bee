@@ -588,11 +588,11 @@ func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, 
 	strs := strings.Split(str, ".")
 	objectname = strs[len(strs)-1]
 	pkgpath = strings.Join(strs[:len(strs)-1], "/")
-	getInternalModel(str, sourceFile, sourceFilePkg, &m, realTypes, true, "", 0)
+	getInternalModel(str, sourceFile, sourceFilePkg, &m, &realTypes, true, "", 0)
 	return
 }
 
-func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m *swagger.Model, realTypes []string, isRoot bool, pkgRealpath string, level int) {
+func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m *swagger.Model, realTypes *[]string, isRoot bool, pkgRealpath string, level int) {
 	if level > MAX_ANONYMOUS_LEVEL {
 		panic("exceed anonymous level, there are ")
 	}
@@ -640,7 +640,7 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 						m.Properties = make(map[string]swagger.ModelProperty)
 						for _, field := range st.Fields.List {
 							isSlice, realType := typeAnalyser(field)
-							realTypes = append(realTypes, realType)
+							*realTypes = append(*realTypes, realType)
 							mp := swagger.ModelProperty{}
 							// add type slice
 							if isSlice {
