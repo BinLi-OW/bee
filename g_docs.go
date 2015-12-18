@@ -93,10 +93,10 @@ func urlReplace(src string) string {
 `
 
 const (
-	ajson  = "application/json"
-	axml   = "application/xml"
-	aplain = "text/plain"
-	ahtml  = "text/html"
+	ajson               = "application/json"
+	axml                = "application/xml"
+	aplain              = "text/plain"
+	ahtml               = "text/html"
 	MAX_ANONYMOUS_LEVEL = 30
 )
 
@@ -702,7 +702,7 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 								if ignore := stag.Get("ignore"); ignore != "" {
 									continue
 								}
-							}else {
+							} else {
 								// prorcess anonymous field
 								pair := strings.FieldsFunc(realType, func(char rune) bool {
 									return char == '&' || char == '{' || char == '}' || char == ' '
@@ -715,11 +715,11 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 								if len(pair) == 2 {
 									objectType = pair[0] + "." + pair[1]
 									// println(fmt.Sprintf("processing anonymous field: %s", realType))
-									getInternalModel(objectType, sourceFile, sourceFilePkg, m, realTypes, false, "", level + 1)
-								}else{
+									getInternalModel(objectType, fl, pkg.Name, m, realTypes, false, "", level+1)
+								} else {
 									objectType = pair[0]
 									// println(fmt.Sprintf("processing anonymous field: %s", realType))
-									getInternalModel(objectType, sourceFile, sourceFilePkg, m, realTypes, false, pkgRealpath, level + 1)
+									getInternalModel(objectType, fl, pkg.Name, m, realTypes, false, pkgRealpath, level+1)
 								}
 							}
 						}
