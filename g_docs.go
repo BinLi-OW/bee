@@ -637,10 +637,14 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 						m.Id = k
 					}
 					if st.Fields.List != nil {
-						m.Properties = make(map[string]swagger.ModelProperty)
+						if m.Properties == nil {
+							m.Properties = make(map[string]swagger.ModelProperty)
+						}
 						for _, field := range st.Fields.List {
 							isSlice, realType := typeAnalyser(field)
-							*realTypes = append(*realTypes, realType)
+							if isRoot {
+								*realTypes = append(*realTypes, realType)
+							}
 							mp := swagger.ModelProperty{}
 							// add type slice
 							if isSlice {
@@ -697,7 +701,7 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 									}
 
 									m.Properties[name] = mp
-									// println("add property: ", name)
+									//println("add property: ", name, "property count:", len(m.Properties))
 								}
 								if ignore := stag.Get("ignore"); ignore != "" {
 									continue
