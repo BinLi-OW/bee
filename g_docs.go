@@ -97,8 +97,14 @@ const (
 	axml                = "application/xml"
 	aplain              = "text/plain"
 	ahtml               = "text/html"
-	MAX_ANONYMOUS_LEVEL = 30
+	_MAX_ANONYMOUS_LEVEL = 30
 )
+
+type _RealType struct {
+	RealTypeName string
+	SourceFile *ast.File
+	SourceFilePkg string
+}
 
 var pkgCache map[string]bool //pkg:controller:function:comments comments: key:value
 var controllerComments map[string]string
@@ -568,15 +574,16 @@ func getparams(str string) []string {
 }
 
 func getModelPath(modelName string, sourceFile *ast.File, sourceFilePkg string) string {
+	//println("find model path", modelName, sourceFile.Name.Name)
 	strs := strings.Split(modelName, ".")
 	if len(strs) == 1 {
 		return sourceFilePkg
 	}
 	for _, importPath := range sourceFile.Imports {
 		path := strings.Replace(importPath.Path.Value, "\"", "", -1)
-		//		println("scan " + importPath.Path.Value)
+		//println("scan " + importPath.Path.Value)
 		paths := strings.Split(path, "/")
-		//		println(paths[len(paths)-1], strs[0])
+		//println(paths[len(paths)-1], strs[0])
 		if paths[len(paths)-1] == strs[0] {
 			return path
 		}
@@ -584,7 +591,7 @@ func getModelPath(modelName string, sourceFile *ast.File, sourceFilePkg string) 
 	panic("can't find import path for model " + modelName + " ,source file pkg " + sourceFilePkg)
 }
 
-func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, objectname string, m swagger.Model, realTypes []string) {
+func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, objectname string, m swagger.Model, realTypes []*_RealType) {
 	strs := strings.Split(str, ".")
 	objectname = strs[len(strs)-1]
 	pkgpath = strings.Join(strs[:len(strs)-1], "/")
@@ -592,9 +599,9 @@ func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, 
 	return
 }
 
-func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m *swagger.Model, realTypes *[]string, isRoot bool, pkgRealpath string, level int) {
-	if level > MAX_ANONYMOUS_LEVEL {
-		panic("exceed anonymous level, there are ")
+func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m *swagger.Model, realTypes *[]*_RealType, isRoot bool, pkgRealpath string, level int) {
+	if level > _MAX_ANONYMOUS_LEVEL {
+		panic("exceed anonymous level, there may be some cycle reference")
 	}
 	strs := strings.Split(str, ".")
 	objectname := strs[len(strs)-1]
@@ -609,10 +616,11 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 		return !info.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".go")
 	}, parser.ParseComments)
 
-	Debugf(fmt.Sprintf("isRoot: %s, objectname: %s, pkgpath: %s, pkgRealpath: %s", strconv.FormatBool(isRoot), objectname, pkgpath, pkgRealpath))
+	Debugf(fmt.Sprintf("isRoot: %s, objectname: %s, pkgpath: %s, sourceFilePkg: %s, pkgRealpath: %s, topPath: %s",
+		strconv.FormatBool(isRoot), objectname, pkgpath, sourceFilePkg, pkgRealpath, topPath))
 	if err != nil {
 		println("----------", pkgRealpath)
-		ColorLog("[ERRO] the model %s parser.ParseDir error\n", str)
+		ColorLog("[ERRO] the model %s parser.ParseDir error %s\n", str, err.Error())
 		os.Exit(1)
 	}
 
@@ -643,7 +651,11 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 						for _, field := range st.Fields.List {
 							isSlice, realType := typeAnalyser(field)
 							if isRoot {
-								*realTypes = append(*realTypes, realType)
+								*realTypes = append(*realTypes, &_RealType{
+									RealTypeName: realType,
+									SourceFile: fl,
+									SourceFilePkg: pkgRealpath[len(topPath):],
+								})
 							}
 							mp := swagger.ModelProperty{}
 							// add type slice
@@ -656,7 +668,7 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 									mp.Items["$ref"] = realType
 								}
 							} else {
-								mp.Type = realType
+								mp.Type = getSwaggerTypeName(realType)
 							}
 
 							// not anonymous field
@@ -708,9 +720,7 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 								}
 							} else {
 								// prorcess anonymous field
-								pair := strings.FieldsFunc(realType, func(char rune) bool {
-									return char == '&' || char == '{' || char == '}' || char == ' '
-								})
+								pair := strings.FieldsFunc(realType, isPointerTypeSpecialChar)
 								if len(pair) != 1 && len(pair) != 2 {
 									panic(fmt.Sprintf("anonymous field must declared with package name and type name: %s", realType))
 									continue
@@ -741,6 +751,10 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 	return
 }
 
+func isPointerTypeSpecialChar(char rune) bool {
+	return char == '&' || char == '{' || char == '}' || char == ' '
+}
+
 func typeAnalyser(f *ast.Field) (isSlice bool, realType string) {
 	if arr, ok := f.Type.(*ast.ArrayType); ok {
 		if isBasicType(fmt.Sprint(arr.Elt)) {
@@ -750,16 +764,36 @@ func typeAnalyser(f *ast.Field) (isSlice bool, realType string) {
 			return false, fmt.Sprintf("map[%v][%v]", mp.Key, mp.Value)
 		}
 		if star, ok := arr.Elt.(*ast.StarExpr); ok {
-			return true, fmt.Sprint(star.X)
+			return true, getPointerRealType(fmt.Sprint(star.X))
 		} else {
 			return true, fmt.Sprint(arr.Elt)
 		}
 	} else {
 		switch t := f.Type.(type) {
 		case *ast.StarExpr:
-			return false, fmt.Sprint(t.X)
+			return false, getPointerRealType(fmt.Sprint(t.X))
 		}
 		return false, fmt.Sprint(f.Type)
+	}
+}
+
+func getSwaggerTypeName(realType string) string {
+	index := strings.Index(realType, ".")
+	if index == -1 {
+		return realType
+	} else {
+		return realType[index+1:]
+	}
+}
+
+func getPointerRealType(realType string) string {
+	pair := strings.FieldsFunc(realType, isPointerTypeSpecialChar)
+	if len(pair) == 2 {
+		return fmt.Sprintf("%s.%s", pair[0], pair[1])
+	}else if len(pair) == 1 {
+		return pair[0]
+	}else{
+		return realType
 	}
 }
 
@@ -794,22 +828,22 @@ func grepJsonTag(tag string) string {
 }
 
 // append models
-func appendModels(cmpath, pkgpath, controllerName string, realTypes []string, fl *ast.File) {
-	var p string
+func appendModels(cmpath, pkgpath, controllerName string, realTypes []*_RealType, fl *ast.File) {
+	var packageName string
 	if cmpath != "" {
-		p = strings.Join(strings.Split(cmpath, "/"), ".") + "."
+		packageName = strings.Join(strings.Split(cmpath, "/"), ".") + "."
 	} else {
-		p = ""
+		packageName = ""
 	}
 	for _, realType := range realTypes {
-		if realType != "" && !isBasicType(strings.TrimLeft(realType, "[]")) &&
-			!strings.HasPrefix(realType, "map") && !strings.HasPrefix(realType, "&") {
-			if _, ok := modelsList[pkgpath+controllerName][p+realType]; ok {
+		if realType.RealTypeName != "" && !isBasicType(strings.TrimLeft(realType.RealTypeName, "[]")) &&
+			!strings.HasPrefix(realType.RealTypeName, "map") && !strings.HasPrefix(realType.RealTypeName, "&") {
+			if _, ok := modelsList[pkgpath+controllerName][packageName+realType.RealTypeName]; ok {
 				continue
 			}
 			//fmt.Printf(pkgpath + ":" + controllerName + ":" + cmpath + ":" + realType + "\n")
-			_, _, mod, newRealTypes := getModel(p+realType, fl, pkgpath)
-			modelsList[pkgpath+controllerName][p+realType] = mod
+			_, _, mod, newRealTypes := getModel(realType.RealTypeName, realType.SourceFile, realType.SourceFilePkg)
+			modelsList[pkgpath+controllerName][packageName+realType.RealTypeName] = mod
 			appendModels(cmpath, pkgpath, controllerName, newRealTypes, fl)
 		}
 	}
