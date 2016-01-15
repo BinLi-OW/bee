@@ -624,6 +624,7 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 		os.Exit(1)
 	}
 
+	foundTypeButNotStruct := false
 	for _, pkg := range astPkgs {
 		for _, fl := range pkg.Files {
 			for k, d := range fl.Scope.Objects {
@@ -639,6 +640,7 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 					}
 					st, ok := ts.Type.(*ast.StructType)
 					if !ok {
+						foundTypeButNotStruct = true
 						continue
 					}
 					if isRoot {
@@ -743,7 +745,7 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 			}
 		}
 	}
-	if m.Id == "" {
+	if !foundTypeButNotStruct && m.Id == "" {
 		fmt.Println(fmt.Sprintf("ERROR: can't find the object: %s in file %s", str, sourceFile.Package))
 		ColorLog("can't find the object: %v in file %v", str, sourceFile.Package)
 		os.Exit(1)
