@@ -694,7 +694,6 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 											SourceFilePkg: pkgRealpath[len(topPath):],
 										})
 									}
-
 									// set property name to the left most json tag value only if is not omitempty
 									if len(tagValues) > 0 && tagValues[0] != "omitempty" {
 										name = tagValues[0]
@@ -720,6 +719,13 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 									continue
 								}
 							} else {
+								if isRoot {
+									*realTypes = append(*realTypes, &_RealType{
+										RealTypeName: realType,
+										SourceFile: fl,
+										SourceFilePkg: pkgRealpath[len(topPath):],
+									})
+								}
 								// prorcess anonymous field
 								pair := strings.FieldsFunc(realType, isPointerTypeSpecialChar)
 								if len(pair) != 1 && len(pair) != 2 {
