@@ -651,16 +651,8 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 							m.Properties = make(map[string]swagger.ModelProperty)
 						}
 						for _, field := range st.Fields.List {
-							isSlice, realType := typeAnalyser(field)
-							if isRoot {
-								*realTypes = append(*realTypes, &_RealType{
-									RealTypeName: realType,
-									SourceFile: fl,
-									SourceFilePkg: pkgRealpath[len(topPath):],
-								})
-							}
 							mp := swagger.ModelProperty{}
-							// add type slice
+							isSlice, realType := typeAnalyser(field)
 							if isSlice {
 								if isBasicType(realType) {
 									mp.Type = "[]" + realType
@@ -695,6 +687,13 @@ func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m 
 
 								// dont add property if json tag first value is "-"
 								if len(tagValues) == 0 || tagValues[0] != "-" {
+									if isRoot {
+										*realTypes = append(*realTypes, &_RealType{
+											RealTypeName: realType,
+											SourceFile: fl,
+											SourceFilePkg: pkgRealpath[len(topPath):],
+										})
+									}
 
 									// set property name to the left most json tag value only if is not omitempty
 									if len(tagValues) > 0 && tagValues[0] != "omitempty" {
