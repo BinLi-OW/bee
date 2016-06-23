@@ -182,7 +182,7 @@ func (c *{{controllerName}}Controller) Post() {
 	} else {
 		c.Data["json"] = err.Error()
 	}
-	c.ServeJson()
+	c.ServeJSON()
 }
 
 // @Title Get
@@ -192,7 +192,7 @@ func (c *{{controllerName}}Controller) Post() {
 // @Failure 403 :id is empty
 // @router /:id [get]
 func (c *{{controllerName}}Controller) GetOne() {
-	idStr := c.Ctx.Input.Params[":id"]
+	idStr := c.Ctx.Input.Param(":id")
 	id, _ := strconv.ParseInt(idStr, 0, 64)
 	v, err := models.Get{{controllerName}}ById(id)
 	if err != nil {
@@ -200,7 +200,7 @@ func (c *{{controllerName}}Controller) GetOne() {
 	} else {
 		c.Data["json"] = v
 	}
-	c.ServeJson()
+	c.ServeJSON()
 }
 
 // @Title Get All
@@ -248,7 +248,7 @@ func (c *{{controllerName}}Controller) GetAll() {
 			kv := strings.Split(cond, ":")
 			if len(kv) != 2 {
 				c.Data["json"] = errors.New("Error: invalid query key/value pair")
-				c.ServeJson()
+				c.ServeJSON()
 				return
 			}
 			k, v := kv[0], kv[1]
@@ -262,7 +262,7 @@ func (c *{{controllerName}}Controller) GetAll() {
 	} else {
 		c.Data["json"] = l
 	}
-	c.ServeJson()
+	c.ServeJSON()
 }
 
 // @Title Update
@@ -273,7 +273,7 @@ func (c *{{controllerName}}Controller) GetAll() {
 // @Failure 403 :id is not int
 // @router /:id [put]
 func (c *{{controllerName}}Controller) Put() {
-	idStr := c.Ctx.Input.Params[":id"]
+	idStr := c.Ctx.Input.Param(":id")
 	id, _ := strconv.ParseInt(idStr, 0, 64)
 	v := models.{{controllerName}}{Id: id}
 	json.Unmarshal(c.Ctx.Input.RequestBody, &v)
@@ -282,7 +282,7 @@ func (c *{{controllerName}}Controller) Put() {
 	} else {
 		c.Data["json"] = err.Error()
 	}
-	c.ServeJson()
+	c.ServeJSON()
 }
 
 // @Title Delete
@@ -292,13 +292,13 @@ func (c *{{controllerName}}Controller) Put() {
 // @Failure 403 id is empty
 // @router /:id [delete]
 func (c *{{controllerName}}Controller) Delete() {
-	idStr := c.Ctx.Input.Params[":id"]
+	idStr := c.Ctx.Input.Param(":id")
 	id, _ := strconv.ParseInt(idStr, 0, 64)
 	if err := models.Delete{{controllerName}}(id); err == nil {
 		c.Data["json"] = "OK"
 	} else {
 		c.Data["json"] = err.Error()
 	}
-	c.ServeJson()
+	c.ServeJSON()
 }
 `
