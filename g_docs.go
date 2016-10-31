@@ -173,7 +173,10 @@ func generateDocs(curpath string) {
 					for _, l := range smtp.Rhs {
 						if v, ok := l.(*ast.CallExpr); ok {
 							f, params := analisysNewNamespace(v)
-							globalDocsTemplate = strings.Replace(globalDocsTemplate, "{{.version}}", f, -1)
+							if f != "" {
+								ColorLog("[TRAC] analisysNewNamespace replace root : %s\n", f)
+								globalDocsTemplate = strings.Replace(globalDocsTemplate, "{{.version}}", f, -1)
+							}
 							for _, p := range params {
 								switch pp := p.(type) {
 								case *ast.CallExpr:
