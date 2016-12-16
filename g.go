@@ -14,48 +14,48 @@
 
 package main
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 var cmdGenerate = &Command{
-	UsageLine: "generate [Command]",
-	Short:     "source code generator",
-	Long: `
-bee generate scaffold [scaffoldname] [-fields=""] [-driver=mysql] [-conn="root:@tcp(127.0.0.1:3306)/test"]
-    The generate scaffold command will do a number of things for you.
-    -fields: a list of table fields. Format: field:type, ...
-    -driver: [mysql | postgres | sqlite], the default is mysql
-    -conn:   the connection string used by the driver, the default is root:@tcp(127.0.0.1:3306)/test
-    example: bee generate scaffold post -fields="title:string,body:text"
+	UsageLine: "generate [command]",
+	Short:     "Source code generator",
+	Long: `▶ {{"To scaffold out your entire application:"|bold}}
 
-bee generate model [modelname] [-fields=""]
-    generate RESTFul model based on fields
-    -fields: a list of table fields. Format: field:type, ...
+     $ bee generate scaffold [scaffoldname] [-fields="title:string,body:text"] [-driver=mysql] [-conn="root:@tcp(127.0.0.1:3306)/test"]
 
-bee generate controller [controllerfile]
-    generate RESTFul controllers             
+  ▶ {{"To generate a Model based on fields:"|bold}}
 
-bee generate view [viewpath]
-    generate CRUD view in viewpath
+     $ bee generate model [modelname] [-fields="name:type"]
 
-bee generate migration [migrationfile] [-fields=""]
-    generate migration file for making database schema update
-    -fields: a list of table fields. Format: field:type, ...
-	
-bee generate docs
-    generate swagger doc file
+  ▶ {{"To generate a controller:"|bold}}
 
-bee generate test [routerfile]
-    generate testcase
+     $ bee generate controller [controllerfile]
 
-bee generate appcode [-tables=""] [-driver=mysql] [-conn="root:@tcp(127.0.0.1:3306)/test"] [-level=3]
-    generate appcode based on an existing database
-    -tables: a list of table names separated by ',', default is empty, indicating all tables
-    -driver: [mysql | postgres | sqlite], the default is mysql
-    -conn:   the connection string used by the driver.
-             default for mysql:    root:@tcp(127.0.0.1:3306)/test
-             default for postgres: postgres://postgres:postgres@127.0.0.1:5432/postgres
-    -level:  [1 | 2 | 3], 1 = models; 2 = models,controllers; 3 = models,controllers,router
+  ▶ {{"To generate a CRUD view:"|bold}}
+
+     $ bee generate view [viewpath]
+
+  ▶ {{"To generate a migration file for making database schema updates:"|bold}}
+
+     $ bee generate migration [migrationfile] [-fields="name:type"]
+
+  ▶ {{"To generate swagger doc file:"|bold}}
+
+     $ bee generate docs
+
+  ▶ {{"To generate a test case:"|bold}}
+
+     $ bee generate test [routerfile]
+
+  ▶ {{"To generate appcode based on an existing database:"|bold}}
+
+     $ bee generate appcode [-tables=""] [-driver=mysql] [-conn="root:@tcp(127.0.0.1:3306)/test"] [-level=3]
 `,
+	PreRun: func(cmd *Command, args []string) { ShowShortVersionBanner() },
+	Run:    generateCode,
 }
 
 var driver docValue
@@ -65,40 +65,38 @@ var tables docValue
 var fields docValue
 
 func init() {
-	cmdGenerate.Run = generateCode
-	cmdGenerate.Flag.Var(&tables, "tables", "specify tables to generate model")
-	cmdGenerate.Flag.Var(&driver, "driver", "database driver: mysql, postgresql, etc.")
-	cmdGenerate.Flag.Var(&conn, "conn", "connection string used by the driver to connect to a database instance")
-	cmdGenerate.Flag.Var(&level, "level", "1 = models only; 2 = models and controllers; 3 = models, controllers and routers")
-	cmdGenerate.Flag.Var(&fields, "fields", "specify the fields want to generate.")
+	cmdGenerate.Flag.Var(&tables, "tables", "List of table names separated by a comma.")
+	cmdGenerate.Flag.Var(&driver, "driver", "Database driver. Either mysql, postgres or sqlite.")
+	cmdGenerate.Flag.Var(&conn, "conn", "Connection string used by the driver to connect to a database instance.")
+	cmdGenerate.Flag.Var(&level, "level", "Either 1, 2 or 3. i.e. 1=models; 2=models and controllers; 3=models, controllers and routers.")
+	cmdGenerate.Flag.Var(&fields, "fields", "List of table fields.")
 }
 
 func generateCode(cmd *Command, args []string) int {
-	curpath, _ := os.Getwd()
+	currpath, _ := os.Getwd()
 	if len(args) < 1 {
-		ColorLog("[ERRO] command is missing\n")
-		os.Exit(2)
+		logger.Fatal("Command is missing")
 	}
 
-	gopath := os.Getenv("GOPATH")
-	Debugf("gopath:%s", gopath)
-	if gopath == "" {
-		ColorLog("[ERRO] $GOPATH not found\n")
-		ColorLog("[HINT] Set $GOPATH in your environment vairables\n")
-		os.Exit(2)
+	gps := GetGOPATHs()
+	if len(gps) == 0 {
+		logger.Fatal("GOPATH environment variable is not set or empty")
 	}
+
+	gopath := gps[0]
+
+	logger.Debugf("GOPATH: %s", __FILE__(), __LINE__(), gopath)
 
 	gcmd := args[0]
 	switch gcmd {
 	case "scaffold":
 		if len(args) < 2 {
-			ColorLog("[ERRO] Wrong number of arguments\n")
-			ColorLog("[HINT] Usage: bee generate scaffold [scaffoldname] [-fields=\"\"]\n")
-			os.Exit(2)
+			logger.Fatal("Wrong number of arguments. Run: bee help generate")
 		}
+		// Load the configuration
 		err := loadConfig()
 		if err != nil {
-			ColorLog("[ERRO] Fail to parse bee.json[ %s ]\n", err)
+			logger.Fatalf("Failed to load configuration: %s", err)
 		}
 		cmd.Flag.Parse(args[2:])
 		if driver == "" {
@@ -114,20 +112,18 @@ func generateCode(cmd *Command, args []string) int {
 			}
 		}
 		if fields == "" {
-			ColorLog("[ERRO] Wrong number of arguments\n")
-			ColorLog("[HINT] Usage: bee generate scaffold [scaffoldname] [-fields=\"title:string,body:text\"]\n")
-			os.Exit(2)
+			logger.Hint("fields option should not be empty, i.e. -fields=\"title:string,body:text\"")
+			logger.Fatal("Wrong number of arguments. Run: bee help generate")
 		}
 		sname := args[1]
-		ColorLog("[INFO] Using '%s' as scaffold name\n", sname)
-		generateScaffold(sname, fields.String(), curpath, driver.String(), conn.String())
+		generateScaffold(sname, fields.String(), currpath, driver.String(), conn.String())
 	case "docs":
-		generateDocs(curpath)
+		generateDocs(currpath)
 	case "appcode":
-		// load config
+		// Load the configuration
 		err := loadConfig()
 		if err != nil {
-			ColorLog("[ERRO] Fail to parse bee.json[ %s ]\n", err)
+			logger.Fatalf("Failed to load configuration: %s", err)
 		}
 		cmd.Flag.Parse(args[1:])
 		if driver == "" {
@@ -149,63 +145,56 @@ func generateCode(cmd *Command, args []string) int {
 		if level == "" {
 			level = "3"
 		}
-		ColorLog("[INFO] Using '%s' as 'driver'\n", driver)
-		ColorLog("[INFO] Using '%s' as 'conn'\n", conn)
-		ColorLog("[INFO] Using '%s' as 'tables'\n", tables)
-		ColorLog("[INFO] Using '%s' as 'level'\n", level)
-		generateAppcode(driver.String(), conn.String(), level.String(), tables.String(), curpath)
+		logger.Infof("Using '%s' as 'driver'", driver)
+		logger.Infof("Using '%s' as 'conn'", conn)
+		logger.Infof("Using '%s' as 'tables'", tables)
+		logger.Infof("Using '%s' as 'level'", level)
+		generateAppcode(driver.String(), conn.String(), level.String(), tables.String(), currpath)
 	case "migration":
 		if len(args) < 2 {
-			ColorLog("[ERRO] Wrong number of arguments\n")
-			ColorLog("[HINT] Usage: bee generate migration [migrationname] [-fields=\"\"]\n")
-			os.Exit(2)
+			logger.Fatal("Wrong number of arguments. Run: bee help generate")
 		}
 		cmd.Flag.Parse(args[2:])
 		mname := args[1]
-		ColorLog("[INFO] Using '%s' as migration name\n", mname)
+
+		logger.Infof("Using '%s' as migration name", mname)
+
 		upsql := ""
 		downsql := ""
 		if fields != "" {
-			upsql = `m.SQL("CREATE TABLE ` + mname + "(" + generateSQLFromFields(fields.String()) + `)");`
-			downsql = `m.SQL("DROP TABLE ` + "`" + mname + "`" + `")`
+			dbMigrator := newDBDriver()
+			upsql = dbMigrator.generateCreateUp(mname)
+			downsql = dbMigrator.generateCreateDown(mname)
 		}
-		generateMigration(mname, upsql, downsql, curpath)
+		generateMigration(mname, upsql, downsql, currpath)
 	case "controller":
 		if len(args) == 2 {
 			cname := args[1]
-			generateController(cname, curpath)
+			generateController(cname, currpath)
 		} else {
-			ColorLog("[ERRO] Wrong number of arguments\n")
-			ColorLog("[HINT] Usage: bee generate controller [controllername]\n")
-			os.Exit(2)
+			logger.Fatal("Wrong number of arguments. Run: bee help generate")
 		}
 	case "model":
 		if len(args) < 2 {
-			ColorLog("[ERRO] Wrong number of arguments\n")
-			ColorLog("[HINT] Usage: bee generate model [modelname] [-fields=\"\"]\n")
-			os.Exit(2)
+			logger.Fatal("Wrong number of arguments. Run: bee help generate")
 		}
 		cmd.Flag.Parse(args[2:])
 		if fields == "" {
-			ColorLog("[ERRO] Wrong number of arguments\n")
-			ColorLog("[HINT] Usage: bee generate model [modelname] [-fields=\"title:string,body:text\"]\n")
-			os.Exit(2)
+			logger.Hint("fields option should not be empty, i.e. -fields=\"title:string,body:text\"")
+			logger.Fatal("Wrong number of arguments. Run: bee help generate")
 		}
 		sname := args[1]
-		ColorLog("[INFO] Using '%s' as model name\n", sname)
-		generateModel(sname, fields.String(), curpath)
+		generateModel(sname, fields.String(), currpath)
 	case "view":
 		if len(args) == 2 {
 			cname := args[1]
-			generateView(cname, curpath)
+			generateView(cname, currpath)
 		} else {
-			ColorLog("[ERRO] Wrong number of arguments\n")
-			ColorLog("[HINT] Usage: bee generate view [viewpath]\n")
-			os.Exit(2)
+			logger.Fatal("Wrong number of arguments. Run: bee help generate")
 		}
 	default:
-		ColorLog("[ERRO] command is missing\n")
+		logger.Fatal("Command is missing")
 	}
-	ColorLog("[SUCC] generate successfully created!\n")
+	logger.Successf("%s successfully generated!", strings.Title(gcmd))
 	return 0
 }

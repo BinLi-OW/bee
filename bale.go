@@ -28,67 +28,62 @@ import (
 
 var cmdBale = &Command{
 	UsageLine: "bale",
-	Short:     "packs non-Go files to Go source files",
-	Long: `
-Bale command compress all the static files in to a single binary file.
+	Short:     "Transforms non-Go files to Go source files",
+	Long: `Bale command compress all the static files in to a single binary file.
 
-This is usefull to not have to carry static files including js, css, images
-and views when publishing a project.
+  This is useful to not have to carry static files including js, css, images and
+  views when deploying a Web application.
 
-auto-generate unpack function to main package then run it during the runtime.
-This is mainly used for zealots who are requiring 100% Go code.
-
+  It will auto-generate an unpack function to the main package then run it during the runtime.
+  This is mainly used for zealots who are requiring 100% Go code.
 `,
-}
-
-func init() {
-	cmdBale.Run = runBale
+	PreRun: func(cmd *Command, args []string) { ShowShortVersionBanner() },
+	Run:    runBale,
 }
 
 func runBale(cmd *Command, args []string) int {
 	err := loadConfig()
 	if err != nil {
-		ColorLog("[ERRO] Fail to parse bee.json[ %s ]\n", err)
+		logger.Fatalf("Failed to load configuration: %s", err)
 	}
 
 	os.RemoveAll("bale")
 	os.Mkdir("bale", os.ModePerm)
 
-	// Pack and compress data.
+	// Pack and compress data
 	for _, p := range conf.Bale.Dirs {
 		if !isExist(p) {
-			ColorLog("[WARN] Skipped directory( %s )\n", p)
+			logger.Warnf("Skipped directory: %s", p)
 			continue
 		}
-		ColorLog("[INFO] Packing directory( %s )\n", p)
+		logger.Infof("Packaging directory: %s", p)
 		filepath.Walk(p, walkFn)
 	}
 
 	// Generate auto-uncompress function.
 	buf := new(bytes.Buffer)
-	buf.WriteString(fmt.Sprintf(_BALE_HEADER, conf.Bale.Import,
+	buf.WriteString(fmt.Sprintf(BaleHeader, conf.Bale.Import,
 		strings.Join(resFiles, "\",\n\t\t\""),
 		strings.Join(resFiles, ",\n\t\tbale.R")))
 
 	fw, err := os.Create("bale.go")
 	if err != nil {
-		ColorLog("[ERRO] Fail to create file[ %s ]\n", err)
-		os.Exit(2)
+		logger.Fatalf("Failed to create file: %s", err)
 	}
 	defer fw.Close()
 
 	_, err = fw.Write(buf.Bytes())
 	if err != nil {
-		ColorLog("[ERRO] Fail to write data[ %s ]\n", err)
-		os.Exit(2)
+		logger.Fatalf("Failed to write data: %s", err)
 	}
 
-	ColorLog("[SUCC] Baled resources successfully!\n")
+	logger.Success("Baled resources successfully!")
 	return 0
 }
 
 const (
-	_BALE_HEADER = `package main
+	// BaleHeader ...
+	BaleHeader = `package main
 
 import(
 	"os"
@@ -148,14 +143,13 @@ func walkFn(resPath string, info os.FileInfo, err error) error {
 		return nil
 	}
 
-	// Open resource files.
+	// Open resource files
 	fr, err := os.Open(resPath)
 	if err != nil {
-		ColorLog("[ERRO] Fail to read file[ %s ]\n", err)
-		os.Exit(2)
+		logger.Fatalf("Failed to read file: %s", err)
 	}
 
-	// Convert path.
+	// Convert path
 	resPath = strings.Replace(resPath, "_", "_0_", -1)
 	resPath = strings.Replace(resPath, ".", "_1_", -1)
 	resPath = strings.Replace(resPath, "-", "_2_", -1)
@@ -166,25 +160,24 @@ func walkFn(resPath string, info os.FileInfo, err error) error {
 	}
 	resPath = strings.Replace(resPath, sep, "_4_", -1)
 
-	// Create corresponding Go source files.
+	// Create corresponding Go source files
 	os.MkdirAll(path.Dir(resPath), os.ModePerm)
 	fw, err := os.Create("bale/" + resPath + ".go")
 	if err != nil {
-		ColorLog("[ERRO] Fail to create file[ %s ]\n", err)
-		os.Exit(2)
+		logger.Fatalf("Failed to create file: %s", err)
 	}
 	defer fw.Close()
 
-	// Write header.
-	fmt.Fprintf(fw, _HEADER, resPath)
+	// Write header
+	fmt.Fprintf(fw, Header, resPath)
 
-	// Copy and compress data.
+	// Copy and compress data
 	gz := gzip.NewWriter(&ByteWriter{Writer: fw})
 	io.Copy(gz, fr)
 	gz.Close()
 
 	// Write footer.
-	fmt.Fprint(fw, _FOOTER)
+	fmt.Fprint(fw, Footer)
 
 	resFiles = append(resFiles, resPath)
 	return nil
@@ -200,7 +193,8 @@ func filterSuffix(name string) bool {
 }
 
 const (
-	_HEADER = `package bale
+	// Header ...
+	Header = `package bale
 
 import(
 	"bytes"
@@ -210,7 +204,8 @@ import(
 
 func R%s() []byte {
 	gz, err := gzip.NewReader(bytes.NewBuffer([]byte{`
-	_FOOTER = `
+	// Footer ...
+	Footer = `
 	}))
 
 	if err != nil {
@@ -227,6 +222,7 @@ func R%s() []byte {
 
 var newline = []byte{'\n'}
 
+// ByteWriter ...
 type ByteWriter struct {
 	io.Writer
 	c int
@@ -242,12 +238,9 @@ func (w *ByteWriter) Write(p []byte) (n int, err error) {
 			w.Writer.Write(newline)
 			w.c = 0
 		}
-
 		fmt.Fprintf(w.Writer, "0x%02x,", p[n])
 		w.c++
 	}
-
 	n++
-
 	return
 }

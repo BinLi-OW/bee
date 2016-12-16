@@ -26,178 +26,226 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"unicode"
+
+	"gopkg.in/yaml.v2"
 
 	"github.com/astaxie/beego/swagger"
 	"github.com/astaxie/beego/utils"
 )
 
-var globalDocsTemplate = `package docs
-
-import (
-	"encoding/json"
-	"strings"
-
-	"github.com/astaxie/beego"
-	"github.com/astaxie/beego/swagger"
-)
-
 const (
-    Rootinfo string = {{.rootinfo}}
-    Subapi string = {{.subapi}}
-    BasePath string= "{{.version}}"
+	ajson  = "application/json"
+	axml   = "application/xml"
+	aplain = "text/plain"
+	ahtml  = "text/html"
 )
 
-var rootapi swagger.ResourceListing
-var apilist map[string]*swagger.APIDeclaration
-
-func init() {
-	if beego.BConfig.WebConfig.EnableDocs {
-		err := json.Unmarshal([]byte(Rootinfo), &rootapi)
-		if err != nil {
-			beego.Error(err)
-		}
-		err = json.Unmarshal([]byte(Subapi), &apilist)
-		if err != nil {
-			beego.Error(err)
-		}
-		beego.GlobalDocAPI["Root"] = rootapi
-		for k, v := range apilist {
-			for i, a := range v.APIs {
-				a.Path = urlReplace(k + a.Path)
-				v.APIs[i] = a
-			}
-			v.BasePath = BasePath
-			beego.GlobalDocAPI[strings.Trim(k, "/")] = v
-		}
-	}
-}
-
-
-func urlReplace(src string) string {
-	pt := strings.Split(src, "/")
-	for i, p := range pt {
-		if len(p) > 0 {
-			if p[0] == ':' {
-				pt[i] = "{" + p[1:] + "}"
-			} else if p[0] == '?' && p[1] == ':' {
-				pt[i] = "{" + p[2:] + "}"
-			}
-		}
-	}
-	return strings.Join(pt, "/")
-}
-`
-
-const (
-	ajson               = "application/json"
-	axml                = "application/xml"
-	aplain              = "text/plain"
-	ahtml               = "text/html"
-	_MAX_ANONYMOUS_LEVEL = 30
-)
-
-type _RealType struct {
-	RealTypeName string
-	SourceFile *ast.File
-	SourceFilePkg string
-}
-
-var pkgCache map[string]bool //pkg:controller:function:comments comments: key:value
+var pkgCache map[string]struct{} //pkg:controller:function:comments comments: key:value
 var controllerComments map[string]string
 var importlist map[string]string
-var apilist map[string]*swagger.APIDeclaration
-var controllerList map[string][]swagger.API
-var modelsList map[string]map[string]swagger.Model
-var rootapi swagger.ResourceListing
+var controllerList map[string]map[string]*swagger.Item //controllername Paths items
+var modelsList map[string]map[string]swagger.Schema
+var rootapi swagger.Swagger
+var astPkgs map[string]*ast.Package
+
+// refer to builtin.go
+var basicTypes = map[string]string{
+	"bool":        "boolean:",
+	"uint":        "integer:int32",
+	"uint8":       "integer:int32",
+	"uint16":      "integer:int32",
+	"uint32":      "integer:int32",
+	"uint64":      "integer:int64",
+	"int":         "integer:int64",
+	"int8":        "integer:int32",
+	"int16:int32": "integer:int32",
+	"int32":       "integer:int32",
+	"int64":       "integer:int64",
+	"uintptr":     "integer:int64",
+	"float32":     "number:float",
+	"float64":     "number:double",
+	"string":      "string:",
+	"complex64":   "number:float",
+	"complex128":  "number:double",
+	"byte":        "string:byte",
+	"rune":        "string:byte",
+}
 
 func init() {
-	pkgCache = make(map[string]bool)
+	pkgCache = make(map[string]struct{})
 	controllerComments = make(map[string]string)
 	importlist = make(map[string]string)
-	apilist = make(map[string]*swagger.APIDeclaration)
-	controllerList = make(map[string][]swagger.API)
-	modelsList = make(map[string]map[string]swagger.Model)
+	controllerList = make(map[string]map[string]*swagger.Item)
+	modelsList = make(map[string]map[string]swagger.Schema)
+	astPkgs = map[string]*ast.Package{}
+}
+
+func parsePackagesFromDir(dirpath string) {
+	c := make(chan error)
+
+	go func() {
+		filepath.Walk(dirpath, func(fpath string, fileInfo os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if !fileInfo.IsDir() {
+				return nil
+			}
+
+			if fileInfo.Name() != "vendor" {
+				err = parsePackageFromDir(fpath)
+				if err != nil {
+					// Send the error to through the channel and continue walking
+					c <- fmt.Errorf("Error while parsing directory: %s", err.Error())
+					return nil
+				}
+			}
+			return nil
+		})
+		close(c)
+	}()
+
+	for err := range c {
+		logger.Warnf("%s", err)
+	}
+}
+
+func parsePackageFromDir(path string) error {
+	if strings.Index(path, "vendor") >= 0 || strings.Index(path, "github.com") >= 0 {
+		return nil
+	}
+
+	fileSet := token.NewFileSet()
+	folderPkgs, err := parser.ParseDir(fileSet, path, func(info os.FileInfo) bool {
+		name := info.Name()
+		return !info.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".go")
+	}, parser.ParseComments)
+	if err != nil {
+		return err
+	}
+
+	pkgKeyPrefix := ""
+	if strings.Index(path, "src") > 0 && strings.Index(path, "src")+4 < len(path){
+		pkgKeyPrefix = path[strings.Index(path, "src")+4:]
+	}
+
+	isScan := false
+	for _, v := range folderPkgs {
+		astPkgs[pkgKeyPrefix] = v
+		if isScan {
+			panic(errors.New("found multiple pkg in path " + path))
+		}
+		isScan = true
+	}
+
+	return nil
 }
 
 func generateDocs(curpath string) {
 	fset := token.NewFileSet()
 
 	f, err := parser.ParseFile(fset, path.Join(curpath, "routers", "router.go"), nil, parser.ParseComments)
-
 	if err != nil {
-		ColorLog("[ERRO] parse router.go error\n")
-		os.Exit(2)
+		logger.Fatalf("Error while parsing router.go: %s", err)
 	}
 
-	rootapi.Info = swagger.Information{}
-	rootapi.SwaggerVersion = swagger.SwaggerVersion
-	//analysis API comments
+	rootapi.Infos = swagger.Information{}
+	rootapi.SwaggerVersion = "2.0"
+
+	// Analyse API comments
 	if f.Comments != nil {
 		for _, c := range f.Comments {
 			for _, s := range strings.Split(c.Text(), "\n") {
 				if strings.HasPrefix(s, "@APIVersion") {
-					rootapi.APIVersion = strings.TrimSpace(s[len("@APIVersion"):])
+					rootapi.Infos.Version = strings.TrimSpace(s[len("@APIVersion"):])
 				} else if strings.HasPrefix(s, "@Title") {
-					rootapi.Info.Title = strings.TrimSpace(s[len("@Title"):])
+					rootapi.Infos.Title = strings.TrimSpace(s[len("@Title"):])
 				} else if strings.HasPrefix(s, "@Description") {
-					rootapi.Info.Description = strings.TrimSpace(s[len("@Description"):])
+					rootapi.Infos.Description = strings.TrimSpace(s[len("@Description"):])
 				} else if strings.HasPrefix(s, "@TermsOfServiceUrl") {
-					rootapi.Info.TermsOfServiceURL = strings.TrimSpace(s[len("@TermsOfServiceUrl"):])
+					rootapi.Infos.TermsOfService = strings.TrimSpace(s[len("@TermsOfServiceUrl"):])
 				} else if strings.HasPrefix(s, "@Contact") {
-					rootapi.Info.Contact = strings.TrimSpace(s[len("@Contact"):])
-				} else if strings.HasPrefix(s, "@License") {
-					rootapi.Info.License = strings.TrimSpace(s[len("@License"):])
+					rootapi.Infos.Contact.EMail = strings.TrimSpace(s[len("@Contact"):])
+				} else if strings.HasPrefix(s, "@Name") {
+					rootapi.Infos.Contact.Name = strings.TrimSpace(s[len("@Name"):])
+				} else if strings.HasPrefix(s, "@URL") {
+					rootapi.Infos.Contact.URL = strings.TrimSpace(s[len("@URL"):])
 				} else if strings.HasPrefix(s, "@LicenseUrl") {
-					rootapi.Info.LicenseURL = strings.TrimSpace(s[len("@LicenseUrl"):])
+					if rootapi.Infos.License == nil {
+						rootapi.Infos.License = &swagger.License{URL: strings.TrimSpace(s[len("@LicenseUrl"):])}
+					} else {
+						rootapi.Infos.License.URL = strings.TrimSpace(s[len("@LicenseUrl"):])
+					}
+				} else if strings.HasPrefix(s, "@License") {
+					if rootapi.Infos.License == nil {
+						rootapi.Infos.License = &swagger.License{Name: strings.TrimSpace(s[len("@License"):])}
+					} else {
+						rootapi.Infos.License.Name = strings.TrimSpace(s[len("@License"):])
+					}
+				} else if strings.HasPrefix(s, "@Schemes") {
+					rootapi.Schemes = strings.Split(strings.TrimSpace(s[len("@Schemes"):]), ",")
+				} else if strings.HasPrefix(s, "@Host") {
+					rootapi.Host = strings.TrimSpace(s[len("@Host"):])
 				}
 			}
 		}
 	}
+
+	// Analyse controller package
 	for _, im := range f.Imports {
 		localName := ""
 		if im.Name != nil {
 			localName = im.Name.Name
 		}
-		analisyscontrollerPkg(localName, im.Path.Value)
+		analyseControllerPkg(localName, im.Path.Value)
 	}
 	for _, d := range f.Decls {
 		switch specDecl := d.(type) {
 		case *ast.FuncDecl:
 			for _, l := range specDecl.Body.List {
-				switch smtp := l.(type) {
+				switch stmt := l.(type) {
 				case *ast.AssignStmt:
-					for _, l := range smtp.Rhs {
+					for _, l := range stmt.Rhs {
 						if v, ok := l.(*ast.CallExpr); ok {
-							f, params := analisysNewNamespace(v)
-							if f != "" {
-								ColorLog("[TRAC] analisysNewNamespace replace root : %s\n", f)
-								globalDocsTemplate = strings.Replace(globalDocsTemplate, "{{.version}}", f, -1)
+							// Analyse NewNamespace, it will return version and the subfunction
+							if selName := v.Fun.(*ast.SelectorExpr).Sel.String(); selName != "NewNamespace" {
+								continue
+							}
+							version, params := analyseNewNamespace(v)
+							if rootapi.BasePath == "" && version != "" {
+								rootapi.BasePath = version
 							}
 							for _, p := range params {
 								switch pp := p.(type) {
 								case *ast.CallExpr:
+									controllerName := ""
 									if selname := pp.Fun.(*ast.SelectorExpr).Sel.String(); selname == "NSNamespace" {
-										s, params := analisysNewNamespace(pp)
-										subapi := swagger.APIRef{Path: s}
-										controllerName := ""
+										s, params := analyseNewNamespace(pp)
 										for _, sp := range params {
 											switch pp := sp.(type) {
 											case *ast.CallExpr:
 												if pp.Fun.(*ast.SelectorExpr).Sel.String() == "NSInclude" {
-													controllerName = analisysNSInclude(s, pp)
+													controllerName = analyseNSInclude(s, pp)
+													if v, ok := controllerComments[controllerName]; ok {
+														rootapi.Tags = append(rootapi.Tags, swagger.Tag{
+															Name:        strings.Trim(s, "/"),
+															Description: v,
+														})
+													}
 												}
 											}
 										}
-										if v, ok := controllerComments[controllerName]; ok {
-											subapi.Description = v
-										}
-										rootapi.APIs = append(rootapi.APIs, subapi)
 									} else if selname == "NSInclude" {
-										analisysNSInclude(f, pp)
+										controllerName = analyseNSInclude("", pp)
+										if v, ok := controllerComments[controllerName]; ok {
+											rootapi.Tags = append(rootapi.Tags, swagger.Tag{
+												Name:        controllerName, // if the NSInclude has no prefix, we use the controllername as the tag
+												Description: v,
+											})
+										}
 									}
 								}
 							}
@@ -208,26 +256,28 @@ func generateDocs(curpath string) {
 			}
 		}
 	}
-	apiinfo, err := json.Marshal(rootapi)
+	os.Mkdir(path.Join(curpath, "swagger"), 0755)
+	fd, err := os.Create(path.Join(curpath, "swagger", "swagger.json"))
+	fdyml, err := os.Create(path.Join(curpath, "swagger", "swagger.yml"))
 	if err != nil {
 		panic(err)
 	}
-	subapi, err := json.Marshal(apilist)
-	if err != nil {
-		panic(err)
-	}
-	os.Mkdir(path.Join(curpath, "docs"), 0755)
-	fd, err := os.Create(path.Join(curpath, "docs", "docs.go"))
-	if err != nil {
-		panic(err)
-	}
+	defer fdyml.Close()
 	defer fd.Close()
-	a := strings.Replace(globalDocsTemplate, "{{.rootinfo}}", "`"+string(apiinfo)+"`", -1)
-	a = strings.Replace(a, "{{.subapi}}", "`"+string(subapi)+"`", -1)
-	fd.WriteString(a)
+	dt, err := json.MarshalIndent(rootapi, "", "    ")
+	dtyml, erryml := yaml.Marshal(rootapi)
+	if err != nil || erryml != nil {
+		panic(err)
+	}
+	_, err = fd.Write(dt)
+	_, erryml = fdyml.Write(dtyml)
+	if err != nil || erryml != nil {
+		panic(err)
+	}
 }
 
-func analisysNewNamespace(ce *ast.CallExpr) (first string, others []ast.Expr) {
+// analyseNewNamespace returns version and the others params
+func analyseNewNamespace(ce *ast.CallExpr) (first string, others []ast.Expr) {
 	for i, p := range ce.Args {
 		if i == 0 {
 			switch pp := p.(type) {
@@ -241,58 +291,60 @@ func analisysNewNamespace(ce *ast.CallExpr) (first string, others []ast.Expr) {
 	return
 }
 
-func analisysNSInclude(baseurl string, ce *ast.CallExpr) string {
+func analyseNSInclude(baseurl string, ce *ast.CallExpr) string {
 	cname := ""
-	a := &swagger.APIDeclaration{}
-	a.APIVersion = rootapi.APIVersion
-	a.SwaggerVersion = swagger.SwaggerVersion
-	a.ResourcePath = baseurl
-	a.Produces = []string{"application/json", "application/xml", "text/plain", "text/html"}
-	a.APIs = make([]swagger.API, 0)
-	a.Models = make(map[string]swagger.Model)
 	for _, p := range ce.Args {
 		x := p.(*ast.UnaryExpr).X.(*ast.CompositeLit).Type.(*ast.SelectorExpr)
 		if v, ok := importlist[fmt.Sprint(x.X)]; ok {
 			cname = v + x.Sel.Name
 		}
 		if apis, ok := controllerList[cname]; ok {
-			if len(a.APIs) > 0 {
-				a.APIs = append(a.APIs, apis...)
-			} else {
-				a.APIs = apis
-			}
-		}
-		if models, ok := modelsList[cname]; ok {
-			for _, m := range models {
-				a.Models[m.ID] = m
+			for rt, item := range apis {
+				tag := ""
+				if baseurl != "" {
+					rt = baseurl + rt
+					tag = strings.Trim(baseurl, "/")
+				} else {
+					tag = cname
+				}
+				if item.Get != nil {
+					item.Get.Tags = []string{tag}
+				}
+				if item.Post != nil {
+					item.Post.Tags = []string{tag}
+				}
+				if item.Put != nil {
+					item.Put.Tags = []string{tag}
+				}
+				if item.Patch != nil {
+					item.Patch.Tags = []string{tag}
+				}
+				if item.Head != nil {
+					item.Head.Tags = []string{tag}
+				}
+				if item.Delete != nil {
+					item.Delete.Tags = []string{tag}
+				}
+				if item.Options != nil {
+					item.Options.Tags = []string{tag}
+				}
+				if len(rootapi.Paths) == 0 {
+					rootapi.Paths = make(map[string]*swagger.Item)
+				}
+				rt = urlReplace(rt)
+				rootapi.Paths[rt] = item
 			}
 		}
 	}
-	apilist[baseurl] = a
 	return cname
 }
 
-var topPath string
-
-//dapeng 找到src 目录
-func setTopPath(pkgpath string) {
-	curntPath, _ := os.Getwd()
-	index := strings.Index(curntPath, "src/")
-	curntPath = curntPath[0 : index+4]
-	//	deep := len(strings.Split(pkgpath, "/"))
-	//	for i := 0; i < deep-1; i++ {
-	//		curntPath = path.Join(curntPath, "..")
-	//	}
-	topPath = curntPath
-	// println("top path is", topPath)
-	//	println(pkgpath, "topath is ", topPath)
-}
-
-func analisyscontrollerPkg(localName, pkgpath string) {
-	setTopPath(pkgpath)
-
+func analyseControllerPkg(localName, pkgpath string) {
 	pkgpath = strings.Trim(pkgpath, "\"")
 	if isSystemPackage(pkgpath) {
+		return
+	}
+	if pkgpath == "github.com/astaxie/beego" {
 		return
 	}
 	if localName != "" {
@@ -301,12 +353,9 @@ func analisyscontrollerPkg(localName, pkgpath string) {
 		pps := strings.Split(pkgpath, "/")
 		importlist[pps[len(pps)-1]] = pkgpath
 	}
-	if pkgpath == "github.com/astaxie/beego" {
-		return
-	}
 	gopath := os.Getenv("GOPATH")
 	if gopath == "" {
-		panic("please set gopath")
+		logger.Fatal("GOPATH environment variable is not set or empty")
 	}
 	pkgRealpath := ""
 
@@ -322,19 +371,18 @@ func analisyscontrollerPkg(localName, pkgpath string) {
 		if _, ok := pkgCache[pkgpath]; ok {
 			return
 		}
+		pkgCache[pkgpath] = struct{}{}
 	} else {
-		ColorLog("[ERRO] the %s pkg not exist in gopath\n", pkgpath)
-		os.Exit(1)
+		logger.Fatalf("Package '%s' does not exist in the GOPATH", pkgpath)
 	}
+
 	fileSet := token.NewFileSet()
 	astPkgs, err := parser.ParseDir(fileSet, pkgRealpath, func(info os.FileInfo) bool {
 		name := info.Name()
 		return !info.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".go")
 	}, parser.ParseComments)
-
 	if err != nil {
-		ColorLog("[ERRO] the %s pkg parser.ParseDir error\n", pkgpath)
-		os.Exit(1)
+		logger.Fatalf("Error while parsing dir at '%s': %s", pkgpath, err)
 	}
 	for _, pkg := range astPkgs {
 		for _, fl := range pkg.Files {
@@ -343,16 +391,20 @@ func analisyscontrollerPkg(localName, pkgpath string) {
 				case *ast.FuncDecl:
 					if specDecl.Recv != nil && len(specDecl.Recv.List) > 0 {
 						if t, ok := specDecl.Recv.List[0].Type.(*ast.StarExpr); ok {
+							// Parse controller method
 							parserComments(specDecl.Doc, specDecl.Name.String(), fmt.Sprint(t.X), pkgpath, fl)
 						}
 					}
 				case *ast.GenDecl:
-					if specDecl.Tok.String() == "type" {
+					if specDecl.Tok == token.TYPE {
 						for _, s := range specDecl.Specs {
 							switch tp := s.(*ast.TypeSpec).Type.(type) {
 							case *ast.StructType:
 								_ = tp.Struct
-								controllerComments[pkgpath+s.(*ast.TypeSpec).Name.String()] = specDecl.Doc.Text()
+								// Parse controller definition comments
+								if strings.TrimSpace(specDecl.Doc.Text()) != "" {
+									controllerComments[pkgpath+s.(*ast.TypeSpec).Name.String()] = specDecl.Doc.Text()
+								}
 							}
 						}
 					}
@@ -363,10 +415,11 @@ func analisyscontrollerPkg(localName, pkgpath string) {
 }
 
 func isSystemPackage(pkgpath string) bool {
-	goroot := runtime.GOROOT()
+	goroot := os.Getenv("GOROOT")
 	if goroot == "" {
-		panic("goroot is empty, do you install Go right?")
+		logger.Fatalf("GOROOT environment variable is not set or empty")
 	}
+
 	wg, _ := filepath.EvalSymlinks(filepath.Join(goroot, "src", "pkg", pkgpath))
 	if utils.FileExists(wg) {
 		return true
@@ -381,10 +434,24 @@ func isSystemPackage(pkgpath string) bool {
 	return false
 }
 
+func peekNextSplitString(ss string) (s string, spacePos int) {
+	spacePos = strings.IndexFunc(ss, unicode.IsSpace)
+	if spacePos < 0 {
+		s = ss
+		spacePos = len(ss)
+	} else {
+		s = strings.TrimSpace(ss[:spacePos])
+	}
+	return
+}
+
 // parse the func comments
 func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpath string, fl *ast.File) error {
-	innerapi := swagger.API{}
-	opts := swagger.Operation{}
+	var routerPath string
+	var HTTPMethod string
+	opts := swagger.Operation{
+		Responses: make(map[string]swagger.Response),
+	}
 	if comments != nil && comments.List != nil {
 		for _, c := range comments.List {
 			t := strings.TrimSpace(strings.TrimLeft(c.Text, "//"))
@@ -394,120 +461,151 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 				if len(e1) < 1 {
 					return errors.New("you should has router infomation")
 				}
-				innerapi.Path = e1[0]
+				routerPath = e1[0]
 				if len(e1) == 2 && e1[1] != "" {
 					e1 = strings.SplitN(e1[1], " ", 2)
-					opts.HTTPMethod = strings.ToUpper(strings.Trim(e1[0], "[]"))
+					HTTPMethod = strings.ToUpper(strings.Trim(e1[0], "[]"))
 				} else {
-					opts.HTTPMethod = "GET"
+					HTTPMethod = "GET"
 				}
 			} else if strings.HasPrefix(t, "@Title") {
-				opts.Nickname = strings.TrimSpace(t[len("@Title"):])
+				opts.OperationID = controllerName + "." + strings.TrimSpace(t[len("@Title"):])
 			} else if strings.HasPrefix(t, "@Description") {
-				opts.Summary = strings.TrimSpace(t[len("@Description"):])
+				opts.Description = strings.TrimSpace(t[len("@Description"):])
+			} else if strings.HasPrefix(t, "@Summary") {
+				opts.Summary = strings.TrimSpace(t[len("@Summary"):])
 			} else if strings.HasPrefix(t, "@Success") {
 				ss := strings.TrimSpace(t[len("@Success"):])
-				rs := swagger.ResponseMessage{}
-				st := make([]string, 3)
-				j := 0
-				var tmp []rune
-				start := false
-
-				for i, c := range ss {
-					if unicode.IsSpace(c) {
-						if !start && j < 2 {
-							continue
+				rs := swagger.Response{}
+				respCode, pos := peekNextSplitString(ss)
+				ss = strings.TrimSpace(ss[pos:])
+				respType, pos := peekNextSplitString(ss)
+				if respType == "{object}" || respType == "{array}" {
+					isArray := respType == "{array}"
+					ss = strings.TrimSpace(ss[pos:])
+					schemaName, pos := peekNextSplitString(ss)
+					if schemaName == "" {
+						logger.Fatalf("[%s.%s] Schema must follow {object} or {array}", controllerName, funcName)
+					}
+					if strings.HasPrefix(schemaName, "[]") {
+						schemaName = schemaName[2:]
+						isArray = true
+					}
+					schema := swagger.Schema{}
+					if sType, ok := basicTypes[schemaName]; ok {
+						typeFormat := strings.Split(sType, ":")
+						schema.Type = typeFormat[0]
+						schema.Format = typeFormat[1]
+					} else {
+						m, mod, realTypes := getModel(getRealTypeInFile(schemaName, fl))
+						schema.Ref = "#/definitions/" + m
+						if _, ok := modelsList[pkgpath+controllerName]; !ok {
+							modelsList[pkgpath+controllerName] = make(map[string]swagger.Schema, 0)
 						}
-						if j == 0 || j == 1 {
-							st[j] = string(tmp)
-							tmp = make([]rune, 0)
-							j += 1
-							start = false
-							if j == 1 {
-								continue
-							} else {
-								st[j] = strings.TrimSpace(ss[i+1:])
-								break
-
-							}
+						modelsList[pkgpath+controllerName][schemaName] = mod
+						if false {
+							appendModels(pkgpath, controllerName, realTypes)
+						}
+					}
+					if isArray {
+						rs.Schema = &swagger.Schema{
+							Type:  "array",
+							Items: &schema,
 						}
 					} else {
-						start = true
-						tmp = append(tmp, c)
+						rs.Schema = &schema
 					}
+					rs.Description = strings.TrimSpace(ss[pos:])
+				} else {
+					rs.Description = strings.TrimSpace(ss)
 				}
-				if len(tmp) > 0 && st[2] == "" {
-					st[2] = strings.TrimSpace(string(tmp))
-				}
-				rs.Message = st[2]
-				if st[1] == "{object}" {
-					if st[2] == "" {
-						panic(controllerName + " " + funcName + " has no object")
-					}
-					cmpath, m, mod, realTypes := getModel(st[2], fl, pkgpath)
-					//ll := strings.Split(st[2], ".")
-					//opts.Type = ll[len(ll)-1]
-					{
-						mj, _ := json.Marshal(&m)
-						Debugf("model [%s], result is [%s]", m, string(mj))
-					}
-
-					rs.ResponseModel = m
-					if _, ok := modelsList[pkgpath+controllerName]; !ok {
-						modelsList[pkgpath+controllerName] = make(map[string]swagger.Model, 0)
-					}
-					modelsList[pkgpath+controllerName][st[2]] = mod
-					appendModels(cmpath, pkgpath, controllerName, realTypes, fl)
-				}
-
-				rs.Code, _ = strconv.Atoi(st[0])
-				opts.ResponseMessages = append(opts.ResponseMessages, rs)
+				opts.Responses[respCode] = rs
 			} else if strings.HasPrefix(t, "@Param") {
 				para := swagger.Parameter{}
 				p := getparams(strings.TrimSpace(t[len("@Param "):]))
 				if len(p) < 4 {
-					panic(controllerName + "_" + funcName + "'s comments @Param at least should has 4 params")
+					logger.Fatal(controllerName + "_" + funcName + "'s comments @Param should have at least 4 params")
 				}
 				para.Name = p[0]
-				para.ParamType = p[1]
+				switch p[1] {
+				case "query":
+					fallthrough
+				case "header":
+					fallthrough
+				case "path":
+					fallthrough
+				case "formData":
+					fallthrough
+				case "body":
+					break
+				default:
+					logger.Warnf("[%s.%s] Unknown param location: %s. Possible values are `query`, `header`, `path`, `formData` or `body`.\n", controllerName, funcName, p[1])
+				}
+				para.In = p[1]
 				pp := strings.Split(p[2], ".")
-				para.DataType = pp[len(pp)-1]
-				if len(p) > 4 {
-					para.Required, _ = strconv.ParseBool(p[3])
-					para.Description = p[4]
+				typ := pp[len(pp)-1]
+				if len(pp) >= 2 {
+					m, mod, realTypes := getModel(getRealTypeInFile(p[2], fl))
+					para.Schema = &swagger.Schema{
+						Ref: "#/definitions/" + m,
+					}
+					if _, ok := modelsList[pkgpath+controllerName]; !ok {
+						modelsList[pkgpath+controllerName] = make(map[string]swagger.Schema, 0)
+					}
+					modelsList[pkgpath+controllerName][typ] = mod
+					if false {
+						appendModels(pkgpath, controllerName, realTypes)
+					}
 				} else {
-					para.Description = p[3]
+					isArray := false
+					paraType := ""
+					paraFormat := ""
+					if strings.HasPrefix(typ, "[]") {
+						typ = typ[2:]
+						isArray = true
+					}
+					if typ == "string" || typ == "number" || typ == "integer" || typ == "boolean" ||
+						typ == "array" || typ == "file" {
+						paraType = typ
+					} else if sType, ok := basicTypes[typ]; ok {
+						typeFormat := strings.Split(sType, ":")
+						paraType = typeFormat[0]
+						paraFormat = typeFormat[1]
+					} else {
+						logger.Warnf("[%s.%s] Unknown param type: %s\n", controllerName, funcName, typ)
+					}
+					if isArray {
+						para.Type = "array"
+						para.Items = &swagger.ParameterItems{
+							Type:   paraType,
+							Format: paraFormat,
+						}
+					} else {
+						para.Type = paraType
+						para.Format = paraFormat
+					}
+				}
+				switch len(p) {
+				case 5:
+					para.Required, _ = strconv.ParseBool(p[3])
+					para.Description = strings.Trim(p[4], `" `)
+				case 6:
+					para.Default = str2RealType(p[3], para.Type)
+					para.Required, _ = strconv.ParseBool(p[4])
+					para.Description = strings.Trim(p[5], `" `)
+				default:
+					para.Description = strings.Trim(p[3], `" `)
 				}
 				opts.Parameters = append(opts.Parameters, para)
-
-				//dapeng: append request model
-				st := cutRequestMessage(t)
-				if st[1] == "body" {
-					if st[2] == "" {
-						panic(controllerName + " " + funcName + " has no object")
-					}
-					if st[2] == "string" || st[2] == "true" {
-						continue
-					}
-					cmpath, _, mod, realTypes := getModel(st[2], fl, pkgpath)
-					//ll := strings.Split(st[2], ".")
-					//opts.Type = ll[len(ll)-1]
-					if _, ok := modelsList[pkgpath+controllerName]; !ok {
-						modelsList[pkgpath+controllerName] = make(map[string]swagger.Model, 0)
-					}
-					modelsList[pkgpath+controllerName][st[2]] = mod
-					appendModels(cmpath, pkgpath, controllerName, realTypes, fl)
-				}
-
 			} else if strings.HasPrefix(t, "@Failure") {
-				rs := swagger.ResponseMessage{}
+				rs := swagger.Response{}
 				st := strings.TrimSpace(t[len("@Failure"):])
 				var cd []rune
 				var start bool
 				for i, s := range st {
 					if unicode.IsSpace(s) {
 						if start {
-							rs.Message = strings.TrimSpace(st[i+1:])
+							rs.Description = strings.TrimSpace(st[i+1:])
 							break
 						} else {
 							continue
@@ -516,10 +614,9 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 					start = true
 					cd = append(cd, s)
 				}
-				rs.Code, _ = strconv.Atoi(string(cd))
-				opts.ResponseMessages = append(opts.ResponseMessages, rs)
-			} else if strings.HasPrefix(t, "@Type") {
-				opts.Type = strings.TrimSpace(t[len("@Type"):])
+				opts.Responses[string(cd)] = rs
+			} else if strings.HasPrefix(t, "@Deprecated") {
+				opts.Deprecated, _ = strconv.ParseBool(strings.TrimSpace(t[len("@Deprecated"):]))
 			} else if strings.HasPrefix(t, "@Accept") {
 				accepts := strings.Split(strings.TrimSpace(strings.TrimSpace(t[len("@Accept"):])), ",")
 				for _, a := range accepts {
@@ -541,14 +638,35 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 			}
 		}
 	}
-	innerapi.Operations = append(innerapi.Operations, opts)
-	if innerapi.Path != "" {
-		if _, ok := controllerList[pkgpath+controllerName]; ok {
-			controllerList[pkgpath+controllerName] = append(controllerList[pkgpath+controllerName], innerapi)
+	if routerPath != "" {
+		var item *swagger.Item
+		if itemList, ok := controllerList[pkgpath+controllerName]; ok {
+			if it, ok := itemList[routerPath]; !ok {
+				item = &swagger.Item{}
+			} else {
+				item = it
+			}
 		} else {
-			controllerList[pkgpath+controllerName] = make([]swagger.API, 1)
-			controllerList[pkgpath+controllerName][0] = innerapi
+			controllerList[pkgpath+controllerName] = make(map[string]*swagger.Item)
+			item = &swagger.Item{}
 		}
+		switch HTTPMethod {
+		case "GET":
+			item.Get = &opts
+		case "POST":
+			item.Post = &opts
+		case "PUT":
+			item.Put = &opts
+		case "PATCH":
+			item.Patch = &opts
+		case "DELETE":
+			item.Delete = &opts
+		case "HEAD":
+			item.Head = &opts
+		case "OPTIONS":
+			item.Options = &opts
+		}
+		controllerList[pkgpath+controllerName][routerPath] = item
 	}
 	return nil
 }
@@ -561,16 +679,12 @@ func getparams(str string) []string {
 	var j int
 	var start bool
 	var r []string
-	for i, c := range []rune(str) {
-		if unicode.IsSpace(c) {
+	var quoted int8
+	for _, c := range []rune(str) {
+		if unicode.IsSpace(c) && quoted == 0 {
 			if !start {
 				continue
 			} else {
-				if j == 3 {
-					r = append(r, string(s))
-					r = append(r, strings.TrimSpace((str[i+1:])))
-					break
-				}
 				start = false
 				j++
 				r = append(r, string(s))
@@ -578,268 +692,287 @@ func getparams(str string) []string {
 				continue
 			}
 		}
+
 		start = true
+		if c == '"' {
+			quoted ^= 1
+			continue
+		}
 		s = append(s, c)
+	}
+	if len(s) > 0 {
+		r = append(r, string(s))
 	}
 	return r
 }
 
-func getModelPath(modelName string, sourceFile *ast.File, sourceFilePkg string) string {
-	//println("find model path", modelName, sourceFile.Name.Name)
-	strs := strings.Split(modelName, ".")
-	if len(strs) == 1 {
-		return sourceFilePkg
+func getRealTypeInFile(modelName string, fl *ast.File) string {
+	if strings.Index(modelName, " ") >= 0 {
+		modelName = strings.Replace(modelName, "&", "", -1)
+		modelName = strings.Replace(modelName, "{", "", -1)
+		modelName = strings.Replace(modelName, "}", "", -1)
+		modelName = strings.Replace(modelName, " ", ".", -1)
 	}
-	for _, importPath := range sourceFile.Imports {
-		path := strings.Replace(importPath.Path.Value, "\"", "", -1)
-		//println("scan " + importPath.Path.Value)
-		paths := strings.Split(path, "/")
-		//println(paths[len(paths)-1], strs[0])
-		if paths[len(paths)-1] == strs[0] {
-			return path
+
+	if modelName == "" || modelName == " " {
+		panic(errors.New("model name can't be empty"))
+	}
+	//println(fmt.Sprintf("model name [%s]", modelName))
+
+	if strings.Index(modelName, ".") > 0 {
+		modelPkgName := strings.Split(modelName, ".")[0]
+
+		for _, impt := range fl.Imports {
+			imptPath := strings.Replace(impt.Path.Value, `"`, "", -1)
+			imptPaths := strings.Split(imptPath, "/")
+
+			if imptPaths[len(imptPaths)-1] == modelPkgName {
+				imptPaths = append(imptPaths, strings.Split(modelName, ".")[1])
+				return strings.Join(imptPaths, ".")
+			}
 		}
+
+		panic(errors.New("not found import for " + modelName))
 	}
-	panic("can't find import path for model " + modelName + " ,source file pkg " + sourceFilePkg)
+
+	filePath := getFilePath(fl)
+	return fmt.Sprintf("%s.%s", strings.Replace(filePath, "/", ".", -1), modelName)
 }
 
-func getModel(str string, sourceFile *ast.File, sourceFilePkg string) (pkgpath, objectname string, m swagger.Model, realTypes []*_RealType) {
-	Debugf("try to get model [%s] in package [%s]", str, sourceFilePkg)
+func getModel(str string) (objectname string, m swagger.Schema, realTypes []string) {
 	strs := strings.Split(str, ".")
 	objectname = strs[len(strs)-1]
-	pkgpath = strings.Join(strs[:len(strs)-1], "/")
-	getInternalModel(str, sourceFile, sourceFilePkg, &m, &realTypes, true, "", 0)
-	return
-}
+	objPackagePath := strings.Join(strs[0:len(strs)-1], "/")
 
-func getInternalModel(str string, sourceFile *ast.File, sourceFilePkg string, m *swagger.Model, realTypes *[]*_RealType, isRoot bool, pkgRealpath string, level int) {
-	if level > _MAX_ANONYMOUS_LEVEL {
-		panic("exceed anonymous level, there may be some cycle reference")
-	}
-	strs := strings.Split(str, ".")
-	objectname := strs[len(strs)-1]
-	pkgpath := strings.Join(strs[:len(strs)-1], "/")
+	m.Type = "object"
+	for pkgPath, pkg := range astPkgs {
+		if pkgPath != objPackagePath {
+			continue
+		}
 
-	if pkgRealpath == "" {
-		pkgRealpath = path.Join(topPath, getModelPath(str, sourceFile, sourceFilePkg))
-	}
-	fileSet := token.NewFileSet()
-	astPkgs, err := parser.ParseDir(fileSet, pkgRealpath, func(info os.FileInfo) bool {
-		name := info.Name()
-		return !info.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".go")
-	}, parser.ParseComments)
-
-	Debugf(fmt.Sprintf("isRoot: %s, objectname: %s, pkgpath: %s, sourceFilePkg: %s, pkgRealpath: %s, topPath: %s",
-		strconv.FormatBool(isRoot), objectname, pkgpath, sourceFilePkg, pkgRealpath, topPath))
-	if err != nil {
-		println("----------", pkgRealpath)
-		ColorLog("[ERRO] the model %s parser.ParseDir error %s\n", str, err.Error())
-		os.Exit(1)
-	}
-
-	foundTypeButNotStruct := false
-	for _, pkg := range astPkgs {
 		for _, fl := range pkg.Files {
 			for k, d := range fl.Scope.Objects {
-				// println(fmt.Sprintf("Scan %s, %s, %s", pkg.Name, fl.Name, k))
 				if d.Kind == ast.Typ {
 					if k != objectname {
 						continue
 					}
-					ts, ok := d.Decl.(*ast.TypeSpec)
-					if !ok {
-						ColorLog("Unknown type without TypeSec: %v", d)
-						os.Exit(1)
-					}
-					st, ok := ts.Type.(*ast.StructType)
-					if !ok {
-						foundTypeButNotStruct = true
-						continue
-					}
-					if isRoot {
-						m.ID = k
-					}
-					if st.Fields.List != nil {
-						if m.Properties == nil {
-							m.Properties = make(map[string]swagger.ModelProperty)
-						}
-						for _, field := range st.Fields.List {
-							mp := swagger.ModelProperty{}
-							isSlice, realType := typeAnalyser(field)
-							if isSlice {
-								if isBasicType(realType) {
-									mp.Type = "[]" + realType
-								} else {
-									mp.Type = "array"
-									mp.Items = make(map[string]string)
-									mp.Items["$ref"] = realType
-								}
-							} else {
-								mp.Type = getSwaggerTypeName(realType)
-							}
 
-							// not anonymous field
-							if field.Names != nil {
-
-								// set property name as field name
-								var name = field.Names[0].Name
-
-								// if no tag skip tag processing
-								if field.Tag == nil {
-									m.Properties[name] = mp
-									continue
-								}
-
-								var tagValues []string
-								stag := reflect.StructTag(strings.Trim(field.Tag.Value, "`"))
-								tag := stag.Get("json")
-
-								if tag != "" {
-									tagValues = strings.Split(tag, ",")
-								}
-
-								// dont add property if json tag first value is "-"
-								if len(tagValues) == 0 || tagValues[0] != "-" {
-									if isRoot {
-										*realTypes = append(*realTypes, &_RealType{
-											RealTypeName: realType,
-											SourceFile: fl,
-											SourceFilePkg: pkgRealpath[len(topPath):],
-										})
-									}
-									// set property name to the left most json tag value only if is not omitempty
-									if len(tagValues) > 0 && tagValues[0] != "omitempty" {
-										name = tagValues[0]
-									}
-
-									if thrifttag := stag.Get("thrift"); thrifttag != "" {
-										ts := strings.Split(thrifttag, ",")
-										if ts[0] != "" {
-											name = ts[0]
-										}
-									}
-									if required := stag.Get("required"); required != "" {
-										m.Required = append(m.Required, name)
-									}
-									if desc := stag.Get("description"); desc != "" {
-										mp.Description = desc
-									}
-
-									m.Properties[name] = mp
-									//println("add property: ", name, "property count:", len(m.Properties))
-								}
-								if ignore := stag.Get("ignore"); ignore != "" {
-									continue
-								}
-							} else {
-								if isRoot {
-									*realTypes = append(*realTypes, &_RealType{
-										RealTypeName: realType,
-										SourceFile: fl,
-										SourceFilePkg: pkgRealpath[len(topPath):],
-									})
-								}
-								// prorcess anonymous field
-								pair := strings.FieldsFunc(realType, isPointerTypeSpecialChar)
-								if len(pair) != 1 && len(pair) != 2 {
-									panic(fmt.Sprintf("anonymous field must declared with package name and type name: %s", realType))
-									continue
-								}
-								var objectType string
-								if len(pair) == 2 {
-									objectType = pair[0] + "." + pair[1]
-									 Debugf(fmt.Sprintf("1 processing anonymous field: %s", realType))
-									getInternalModel(objectType, fl, pkg.Name, m, realTypes, false, "", level+1)
-								} else {
-									objectType = pair[0]
-									 Debugf(fmt.Sprintf("2 processing anonymous field: %s", realType))
-									getInternalModel(objectType, fl, pkg.Name, m, realTypes, false, pkgRealpath, level+1)
-								}
-							}
-						}
-					}
-					return
+					parseObject(d, k, &m, &realTypes, true, fl)
 				}
 			}
 		}
 	}
-	if !foundTypeButNotStruct && m.ID == "" {
-		fmt.Println(fmt.Sprintf("ERROR: can't find the object: %s in file %s", str, sourceFile.Package))
-		ColorLog("can't find the object: %v in file %v", str, sourceFile.Package)
-	//if m.ID == "" {
-		ColorLog("can't find the object: %v", str)
-		os.Exit(1)
+	if m.Title == "" {
+		logger.Warnf("Cannot find the object: %s", str)
+		// TODO remove when all type have been supported
+		//os.Exit(1)
 	}
+	if len(rootapi.Definitions) == 0 {
+		rootapi.Definitions = make(map[string]swagger.Schema)
+	}
+	objectname = str
+	rootapi.Definitions[objectname] = m
 	return
 }
 
-func isPointerTypeSpecialChar(char rune) bool {
-	return char == '&' || char == '{' || char == '}' || char == ' '
+func parseObject(d *ast.Object, k string, m *swagger.Schema, realTypes *[]string,
+			isRoot bool, currentFile *ast.File) {
+	ts, ok := d.Decl.(*ast.TypeSpec)
+	if !ok {
+		logger.Fatalf("Unknown type without TypeSec: %v\n", d)
+	}
+	// TODO support other types, such as `ArrayType`, `MapType`, `InterfaceType` etc...
+	st, ok := ts.Type.(*ast.StructType)
+	if !ok {
+		return
+	}
+	if isRoot {
+		m.Title = k
+	}
+	if st.Fields.List != nil {
+		if isRoot {
+			m.Properties = make(map[string]swagger.Propertie)
+		}
+
+		for _, field := range st.Fields.List {
+			realType := ""
+			isSlice, realType, sType := typeAnalyser(field, currentFile)
+			*realTypes = append(*realTypes, realType)
+			mp := swagger.Propertie{}
+			if isSlice {
+				mp.Type = "array"
+				if isBasicType(realType) {
+					typeFormat := strings.Split(sType, ":")
+					mp.Items = &swagger.Propertie{
+						Type:   typeFormat[0],
+						Format: typeFormat[1],
+					}
+				} else {
+					mp.Items = &swagger.Propertie{
+						Ref: "#/definitions/" + realType,
+					}
+				}
+			} else {
+				if sType == "object" {
+					mp.Ref = "#/definitions/" + realType
+				} else if isBasicType(realType) {
+					typeFormat := strings.Split(sType, ":")
+					mp.Type = typeFormat[0]
+					mp.Format = typeFormat[1]
+				} else if realType == "map" {
+					typeFormat := strings.Split(sType, ":")
+					mp.AdditionalProperties = &swagger.Propertie{
+						Type:   typeFormat[0],
+						Format: typeFormat[1],
+					}
+				}
+			}
+			if field.Names != nil {
+
+				// set property name as field name
+				var name = field.Names[0].Name
+
+				// if no tag skip tag processing
+				if field.Tag == nil {
+					m.Properties[name] = mp
+					continue
+				}
+
+				var tagValues []string
+
+				stag := reflect.StructTag(strings.Trim(field.Tag.Value, "`"))
+
+				defaultValue := stag.Get("doc")
+				if defaultValue != "" {
+					r, _ := regexp.Compile(`default\((.*)\)`)
+					if r.MatchString(defaultValue) {
+						res := r.FindStringSubmatch(defaultValue)
+						mp.Default = str2RealType(res[1], realType)
+
+					} else {
+						logger.Warnf("Invalid default value: %s", defaultValue)
+					}
+				}
+
+				tag := stag.Get("json")
+
+				if tag != "" {
+					tagValues = strings.Split(tag, ",")
+				}
+
+				// dont add property if json tag first value is "-"
+				if len(tagValues) == 0 || tagValues[0] != "-" {
+
+					// set property name to the left most json tag value only if is not omitempty
+					if len(tagValues) > 0 && tagValues[0] != "omitempty" {
+						name = tagValues[0]
+					}
+
+					if thrifttag := stag.Get("thrift"); thrifttag != "" {
+						ts := strings.Split(thrifttag, ",")
+						if ts[0] != "" {
+							name = ts[0]
+						}
+					}
+					if required := stag.Get("required"); required != "" {
+						m.Required = append(m.Required, name)
+					}
+					if desc := stag.Get("description"); desc != "" {
+						mp.Description = desc
+					}
+
+					m.Properties[name] = mp
+				}
+				if ignore := stag.Get("ignore"); ignore != "" {
+					continue
+				}
+			} else {
+
+				fieldRealType := getRealTypeInFile(fmt.Sprint(field.Type), currentFile)
+				//println("found nest object ", fmt.Sprint(field.Type), " realType: ", fieldRealType, " in ", k)
+				fieldObj, fieldFile := getObjAndFileByModelRealType(fieldRealType)
+
+				parseObject(fieldObj, fieldRealType, m, realTypes, false, fieldFile)
+			}
+		}
+	}
 }
 
-func typeAnalyser(f *ast.Field) (isSlice bool, realType string) {
+func typeAnalyser(f *ast.Field, fl *ast.File) (isSlice bool, realType, swaggerType string) {
 	if arr, ok := f.Type.(*ast.ArrayType); ok {
 		if isBasicType(fmt.Sprint(arr.Elt)) {
-			return false, fmt.Sprintf("[]%v", arr.Elt)
+			return true, fmt.Sprint(arr.Elt), basicTypes[fmt.Sprint(arr.Elt)]
 		}
 		if mp, ok := arr.Elt.(*ast.MapType); ok {
-			return false, fmt.Sprintf("map[%v][%v]", mp.Key, mp.Value)
+			return false, fmt.Sprintf("map[%v][%v]", mp.Key, mp.Value), "object"
 		}
 		if star, ok := arr.Elt.(*ast.StarExpr); ok {
-			return true, getPointerRealType(fmt.Sprint(star.X))
-		} else {
-			return true, fmt.Sprint(arr.Elt)
+			return true, getRealTypeInFile(fmt.Sprint(star.X), fl), "object"
 		}
-	} else {
-		switch t := f.Type.(type) {
-		case *ast.StarExpr:
-			return false, getPointerRealType(fmt.Sprint(t.X))
-		}
-		return false, fmt.Sprint(f.Type)
+		return true, fmt.Sprint(arr.Elt), "object"
 	}
+	switch t := f.Type.(type) {
+	case *ast.StarExpr:
+		return false, getRealTypeInFile(fmt.Sprint(t.X), fl), "object"
+	case *ast.MapType:
+		val := fmt.Sprintf("%v", t.Value)
+		if isBasicType(val) {
+			return false, "map", basicTypes[val]
+		}
+		return false, val, "object"
+	}
+	if k, ok := basicTypes[fmt.Sprint(f.Type)]; ok {
+		return false, fmt.Sprint(f.Type), k
+	}
+
+	fieldType := fmt.Sprint(f.Type)
+
+	fieldRealType := getRealTypeInFile(fieldType, fl)
+	return false, fieldRealType, "object"
 }
 
-func getSwaggerTypeName(realType string) string {
-	index := strings.Index(realType, ".")
-	if index == -1 {
-		return realType
-	} else {
-		return realType[index+1:]
+func getObjAndFileByModelRealType(modelRealType string) (*ast.Object, *ast.File) {
+	strs := strings.Split(modelRealType, ".")
+	modelPkgPath := strings.Join(strs[0:len(strs)-1], "/")
+	modelName := strs[len(strs)-1]
+
+	for pkgPath, pkg := range astPkgs {
+		if pkgPath != modelPkgPath {
+			continue
+		}
+
+		for _, fl := range pkg.Files {
+			for _, obj := range fl.Scope.Objects {
+				if obj.Name == modelName {
+					return obj, fl
+				}
+			}
+		}
 	}
+
+	panic(errors.New("can't find file for model: " + modelRealType))
 }
 
-func getPointerRealType(realType string) string {
-	pair := strings.FieldsFunc(realType, isPointerTypeSpecialChar)
-	if len(pair) == 2 {
-		return fmt.Sprintf("%s.%s", pair[0], pair[1])
-	}else if len(pair) == 1 {
-		return pair[0]
-	}else{
-		return realType
+func getFilePath(fl *ast.File) string {
+	for pkgPath, pkg := range astPkgs {
+		for _, aFl := range pkg.Files {
+			if aFl == fl {
+				return pkgPath
+			}
+		}
 	}
+	return ""
 }
 
 func isBasicType(Type string) bool {
-	for _, v := range basicTypes {
-		if v == Type {
-			return true
-		}
+	if _, ok := basicTypes[Type]; ok {
+		return true
 	}
 	return false
 }
 
-// refer to builtin.go
-var basicTypes = []string{
-	"bool",
-	"uint", "uint8", "uint16", "uint32", "uint64",
-	"int", "int8", "int16", "int32", "int64",
-	"float32", "float64",
-	"string",
-	"complex64", "complex128",
-	"byte", "rune", "uintptr",
-}
-
 // regexp get json tag
-func grepJsonTag(tag string) string {
+func grepJSONTag(tag string) string {
 	r, _ := regexp.Compile(`json:"([^"]*)"`)
 	matches := r.FindAllStringSubmatch(tag, -1)
 	if len(matches) > 0 {
@@ -849,68 +982,55 @@ func grepJsonTag(tag string) string {
 }
 
 // append models
-func appendModels(cmpath, pkgpath, controllerName string, realTypes []*_RealType, fl *ast.File) {
-	var packageName string
-	if cmpath != "" {
-		packageName = strings.Join(strings.Split(cmpath, "/"), ".") + "."
-	} else {
-		packageName = ""
-	}
+func appendModels(pkgpath, controllerName string, realTypes []string) {
 	for _, realType := range realTypes {
-		if realType.RealTypeName != "" && !isBasicType(strings.TrimLeft(realType.RealTypeName, "[]")) &&
-			!strings.HasPrefix(realType.RealTypeName, "map") && !strings.HasPrefix(realType.RealTypeName, "&") {
-			if _, ok := modelsList[pkgpath+controllerName][packageName+realType.RealTypeName]; ok {
+		if realType != "" && !isBasicType(strings.TrimLeft(realType, "[]")) &&
+			!strings.HasPrefix(realType, "map") && !strings.HasPrefix(realType, "&") {
+			if _, ok := modelsList[pkgpath+controllerName][realType]; ok {
 				continue
 			}
-			//fmt.Printf(pkgpath + ":" + controllerName + ":" + cmpath + ":" + realType + "\n")
-			_, _, mod, newRealTypes := getModel(realType.RealTypeName, realType.SourceFile, realType.SourceFilePkg)
-			modelsList[pkgpath+controllerName][packageName+realType.RealTypeName] = mod
-			appendModels(cmpath, pkgpath, controllerName, newRealTypes, fl)
+			_, mod, newRealTypes := getModel(realType)
+			modelsList[pkgpath+controllerName][realType] = mod
+			appendModels(pkgpath, controllerName, newRealTypes)
 		}
 	}
 }
 
-func getFilePath(f *ast.File) string {
-	return ""
-}
-
-func cutRequestMessage(t string) []string {
-	ss := strings.TrimSpace(t[len("@Success"):])
-	st := make([]string, 3)
-	j := 0
-	var tmp []rune
-	start := false
-
-	for i, c := range ss {
-		if unicode.IsSpace(c) {
-			if !start && j < 2 {
-				continue
+func urlReplace(src string) string {
+	pt := strings.Split(src, "/")
+	for i, p := range pt {
+		if len(p) > 0 {
+			if p[0] == ':' {
+				pt[i] = "{" + p[1:] + "}"
+			} else if p[0] == '?' && p[1] == ':' {
+				pt[i] = "{" + p[2:] + "}"
 			}
-			if j == 0 || j == 1 {
-				st[j] = string(tmp)
-				tmp = make([]rune, 0)
-				j += 1
-				start = false
-				continue
-			} else {
-				st[j] = strings.TrimSpace(ss[i+1:])
-				break
-			}
-		} else {
-			start = true
-			tmp = append(tmp, c)
 		}
 	}
-	if len(tmp) > 0 && st[2] == "" {
-		st[2] = strings.TrimSpace(string(tmp))
+	return strings.Join(pt, "/")
+}
+
+func str2RealType(s string, typ string) interface{} {
+	var err error
+	var ret interface{}
+
+	switch typ {
+	case "int", "int64", "int32", "int16", "int8":
+		ret, err = strconv.Atoi(s)
+	case "bool":
+		ret, err = strconv.ParseBool(s)
+	case "float64":
+		ret, err = strconv.ParseFloat(s, 64)
+	case "float32":
+		ret, err = strconv.ParseFloat(s, 32)
+	default:
+		return s
 	}
 
-	if strings.Index(st[2], " ") >= 0 {
-		st[2] = st[2][0:strings.Index(st[2], " ")]
+	if err != nil {
+		logger.Warnf("Invalid default value type '%s': %s", typ, s)
+		return s
 	}
-	if strings.Index(st[2], "	") >= 0 {
-		st[2] = st[2][0:strings.Index(st[2], "	")]
-	}
-	// println("st2 is ", st[2])
-	return st
+
+	return ret
 }

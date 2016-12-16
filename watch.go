@@ -16,9 +16,9 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -34,11 +34,11 @@ var (
 	scheduleTime time.Time
 )
 
+// NewWatcher starts an fsnotify Watcher on the specified paths
 func NewWatcher(paths []string, files []string, isgenerate bool) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		ColorLog("[ERRO] Fail to create new Watcher[ %s ]\n", err)
-		os.Exit(2)
+		logger.Fatalf("Failed to create watcher: %s", err)
 	}
 
 	go func() {
@@ -47,8 +47,8 @@ func NewWatcher(paths []string, files []string, isgenerate bool) {
 			case e := <-watcher.Event:
 				isbuild := true
 
-				// Skip TMP files for Sublime Text.
-				if checkTMPFile(e.Name) {
+				// Skip ignored files
+				if shouldIgnoreFile(e.Name) {
 					continue
 				}
 				if !checkIfWatchExt(e.Name) {
@@ -57,14 +57,14 @@ func NewWatcher(paths []string, files []string, isgenerate bool) {
 
 				mt := getFileModTime(e.Name)
 				if t := eventTime[e.Name]; mt == t {
-					ColorLog("[SKIP] # %s #\n", e.String())
+					logger.Infof(bold("Skipping: ")+"%s", e.String())
 					isbuild = false
 				}
 
 				eventTime[e.Name] = mt
 
 				if isbuild {
-					ColorLog("[EVEN] %s\n", e)
+					logger.Infof("Event fired: %s", e)
 					go func() {
 						// Wait 1s before autobuild util there is no file change.
 						scheduleTime = time.Now().Add(1 * time.Second)
@@ -76,53 +76,53 @@ func NewWatcher(paths []string, files []string, isgenerate bool) {
 							return
 						}
 
-						Autobuild(files, isgenerate)
+						AutoBuild(files, isgenerate)
 					}()
 				}
 			case err := <-watcher.Error:
-				ColorLog("[WARN] %s\n", err.Error()) // No need to exit here
+				logger.Warnf("Watcher error: %s", err.Error()) // No need to exit here
 			}
 		}
 	}()
 
-	ColorLog("[INFO] Initializing watcher...\n")
+	logger.Info("Initializing watcher...")
 	for _, path := range paths {
-		ColorLog("[TRAC] Directory( %s )\n", path)
+		logger.Infof(bold("Watching: ")+"%s", path)
 		err = watcher.Watch(path)
 		if err != nil {
-			ColorLog("[ERRO] Fail to watch directory[ %s ]\n", err)
-			os.Exit(2)
+			logger.Fatalf("Failed to watch directory: %s", err)
 		}
 	}
 
 }
 
-// getFileModTime retuens unix timestamp of `os.File.ModTime` by given path.
+// getFileModTime returns unix timestamp of `os.File.ModTime` for the given path.
 func getFileModTime(path string) int64 {
 	path = strings.Replace(path, "\\", "/", -1)
 	f, err := os.Open(path)
 	if err != nil {
-		ColorLog("[ERRO] Fail to open file[ %s ]\n", err)
+		logger.Errorf("Failed to open file on '%s': %s", path, err)
 		return time.Now().Unix()
 	}
 	defer f.Close()
 
 	fi, err := f.Stat()
 	if err != nil {
-		ColorLog("[ERRO] Fail to get file information[ %s ]\n", err)
+		logger.Errorf("Failed to get file stats: %s", err)
 		return time.Now().Unix()
 	}
 
 	return fi.ModTime().Unix()
 }
 
-func Autobuild(files []string, isgenerate bool) {
+// AutoBuild builds the specified set of files
+func AutoBuild(files []string, isgenerate bool) {
 	state.Lock()
 	defer state.Unlock()
 
-	ColorLog("[INFO] Start building...\n")
-	path, _ := os.Getwd()
-	os.Chdir(path)
+	logger.Info("Start building...")
+
+	os.Chdir(currpath)
 
 	cmdName := "go"
 	if conf.Gopm.Enable {
@@ -162,7 +162,7 @@ func Autobuild(files []string, isgenerate bool) {
 		icmd.Stdout = os.Stdout
 		icmd.Stderr = os.Stderr
 		icmd.Run()
-		ColorLog("============== generate docs ===================\n")
+		logger.Info("============== Generate Docs ===================")
 	}
 
 	if err == nil {
@@ -186,35 +186,38 @@ func Autobuild(files []string, isgenerate bool) {
 	}
 
 	if err != nil {
-		ColorLog("[ERRO] ============== Build failed ===================\n")
+		logger.Error("============== Build Failed ===================")
 		return
 	}
-	ColorLog("[SUCC] Build was successful\n")
+	logger.Success("Built Successfully!")
 	Restart(appname)
 }
 
+// Kill kills the running command process
 func Kill() {
 	defer func() {
 		if e := recover(); e != nil {
-			fmt.Println("Kill.recover -> ", e)
+			logger.Infof("Kill recover: %s", e)
 		}
 	}()
 	if cmd != nil && cmd.Process != nil {
 		err := cmd.Process.Kill()
 		if err != nil {
-			fmt.Println("Kill -> ", err)
+			logger.Errorf("Error while killing cmd process: %s", err)
 		}
 	}
 }
 
+// Restart kills the running command process and starts it again
 func Restart(appname string) {
-	Debugf("kill running process")
+	logger.Debugf("Kill running process", __FILE__(), __LINE__())
 	Kill()
 	go Start(appname)
 }
 
+// Start starts the command process
 func Start(appname string) {
-	ColorLog("[INFO] Restarting %s ...\n", appname)
+	logger.Infof("Restarting '%s'...", appname)
 	if strings.Index(appname, "./") == -1 {
 		appname = "./" + appname
 	}
@@ -226,19 +229,33 @@ func Start(appname string) {
 	cmd.Env = append(os.Environ(), conf.Envs...)
 
 	go cmd.Run()
-	ColorLog("[INFO] %s is running...\n", appname)
+	logger.Successf("'%s' is running...", appname)
 	started <- true
 }
 
-// checkTMPFile returns true if the event was for TMP files.
-func checkTMPFile(name string) bool {
-	if strings.HasSuffix(strings.ToLower(name), ".tmp") {
-		return true
+// shouldIgnoreFile ignores filenames generated by Emacs, Vim or SublimeText.
+// It returns true if the file should be ignored, false otherwise.
+func shouldIgnoreFile(filename string) bool {
+	for _, regex := range ignoredFilesRegExps {
+		r, err := regexp.Compile(regex)
+		if err != nil {
+			logger.Fatalf("Could not compile regular expression: %s", err)
+		}
+		if r.MatchString(filename) {
+			return true
+		}
+		continue
 	}
 	return false
 }
 
 var watchExts = []string{".go"}
+var ignoredFilesRegExps = []string{
+	`.#(\w+).go`,
+	`.(\w+).go.swp`,
+	`(\w+).go~`,
+	`(\w+).tmp`,
+}
 
 // checkIfWatchExt returns true if the name HasSuffix <watch_ext>.
 func checkIfWatchExt(name string) bool {

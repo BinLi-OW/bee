@@ -16,10 +16,16 @@ package main
 
 import (
 	"encoding/json"
+	"io/ioutil"
 	"os"
+
+	"io"
+	"path/filepath"
+
+	"gopkg.in/yaml.v2"
 )
 
-const CONF_VER = 0
+const confVer = 0
 
 var defaultConf = `{
 	"version": 0,
@@ -50,20 +56,20 @@ var conf struct {
 		Install bool
 	}
 	// Indicates whether execute "go install" before "go build".
-	GoInstall bool     `json:"go_install"`
-	WatchExt  []string `json:"watch_ext"`
+	GoInstall bool     `json:"go_install" yaml:"go_install"`
+	WatchExt  []string `json:"watch_ext" yaml:"watch_ext"`
 	DirStruct struct {
-		WatchAll    bool `json:"watch_all"`
+		WatchAll    bool `json:"watch_all" yaml:"watch_all"`
 		Controllers string
 		Models      string
 		Others      []string // Other directories.
-	} `json:"dir_structure"`
-	CmdArgs []string `json:"cmd_args"`
+	} `json:"dir_structure" yaml:"dir_structure"`
+	CmdArgs []string `json:"cmd_args" yaml:"cmd_args"`
 	Envs    []string
 	Bale    struct {
 		Import string
 		Dirs   []string
-		IngExt []string `json:"ignore_ext"`
+		IngExt []string `json:"ignore_ext" yaml:"ignore_ext"`
 	}
 	Database struct {
 		Driver string
@@ -72,31 +78,58 @@ var conf struct {
 }
 
 // loadConfig loads customized configuration.
-func loadConfig() error {
-	f, err := os.Open("bee.json")
-	if err != nil {
-		// Use default.
+func loadConfig() (err error) {
+	err = filepath.Walk(".", func(path string, fileInfo os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		if fileInfo.IsDir() {
+			return nil
+		}
+
+		if fileInfo.Name() == "bee.json" {
+			logger.Info("Loading configuration from 'bee.json'...")
+			err = parseJSON(path, conf)
+			if err != nil {
+				logger.Errorf("Failed to parse JSON file: %s", err)
+				return err
+			}
+			return io.EOF
+		}
+
+		if fileInfo.Name() == "Beefile" {
+			logger.Info("Loading configuration from 'Beefile'...")
+			err = parseYAML(path, conf)
+			if err != nil {
+				logger.Errorf("Failed to parse YAML file: %s", err)
+				return err
+			}
+			return io.EOF
+		}
+		return nil
+	})
+
+	// In case no configuration file found or an error different than io.EOF,
+	// fallback to default configuration
+	if err != io.EOF {
+		logger.Info("Loading default configuration...")
 		err = json.Unmarshal([]byte(defaultConf), &conf)
 		if err != nil {
-			return err
-		}
-	} else {
-		defer f.Close()
-		ColorLog("[INFO] Detected bee.json\n")
-		d := json.NewDecoder(f)
-		err = d.Decode(&conf)
-		if err != nil {
-			return err
+			return
 		}
 	}
 
-	// Check format version.
-	if conf.Version != CONF_VER {
-		ColorLog("[WARN] Your bee.json is out-of-date, please update!\n")
-		ColorLog("[HINT] Compare bee.json under bee source code path and yours\n")
+	// No need to return io.EOF error
+	err = nil
+
+	// Check format version
+	if conf.Version != confVer {
+		logger.Warn("Your configuration file is outdated. Please do consider updating it.")
+		logger.Hint("Check the latest version of bee's configuration file.")
 	}
 
-	// Set variables.
+	// Set variables
 	if len(conf.DirStruct.Controllers) == 0 {
 		conf.DirStruct.Controllers = "controllers"
 	}
@@ -104,7 +137,39 @@ func loadConfig() error {
 		conf.DirStruct.Models = "models"
 	}
 
-	// Append watch exts.
+	// Append watch exts
 	watchExts = append(watchExts, conf.WatchExt...)
+	return
+}
+
+func parseJSON(path string, v interface{}) error {
+	var (
+		data []byte
+		err  error
+	)
+	data, err = ioutil.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	err = json.Unmarshal(data, &v)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func parseYAML(path string, v interface{}) error {
+	var (
+		data []byte
+		err  error
+	)
+	data, err = ioutil.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	err = yaml.Unmarshal(data, &v)
+	if err != nil {
+		return err
+	}
 	return nil
 }

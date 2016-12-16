@@ -15,54 +15,59 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"strings"
 )
 
-// article
-// cms/article
-//
-func generateController(cname, crupath string) {
+func generateController(cname, currpath string) {
+	w := NewColorWriter(os.Stdout)
+
 	p, f := path.Split(cname)
 	controllerName := strings.Title(f)
 	packageName := "controllers"
+
 	if p != "" {
 		i := strings.LastIndex(p[:len(p)-1], "/")
 		packageName = p[i+1 : len(p)-1]
 	}
-	ColorLog("[INFO] Using '%s' as controller name\n", controllerName)
-	ColorLog("[INFO] Using '%s' as package name\n", packageName)
-	fp := path.Join(crupath, "controllers", p)
+
+	logger.Infof("Using '%s' as controller name", controllerName)
+	logger.Infof("Using '%s' as package name", packageName)
+
+	fp := path.Join(currpath, "controllers", p)
 	if _, err := os.Stat(fp); os.IsNotExist(err) {
-		// create controller directory
+		// Create the controller's directory
 		if err := os.MkdirAll(fp, 0777); err != nil {
-			ColorLog("[ERRO] Could not create controllers directory: %s\n", err)
-			os.Exit(2)
+			logger.Fatalf("Could not create controllers directory: %s", err)
 		}
 	}
+
 	fpath := path.Join(fp, strings.ToLower(controllerName)+".go")
 	if f, err := os.OpenFile(fpath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0666); err == nil {
-		defer f.Close()
-		modelPath := path.Join(crupath, "models", strings.ToLower(controllerName)+".go")
+		defer CloseFile(f)
+
+		modelPath := path.Join(currpath, "models", strings.ToLower(controllerName)+".go")
+
 		var content string
 		if _, err := os.Stat(modelPath); err == nil {
-			ColorLog("[INFO] Using matching model '%s'\n", controllerName)
+			logger.Infof("Using matching model '%s'", controllerName)
 			content = strings.Replace(controllerModelTpl, "{{packageName}}", packageName, -1)
-			pkgPath := getPackagePath(crupath)
+			pkgPath := getPackagePath(currpath)
 			content = strings.Replace(content, "{{pkgPath}}", pkgPath, -1)
 		} else {
 			content = strings.Replace(controllerTpl, "{{packageName}}", packageName, -1)
 		}
+
 		content = strings.Replace(content, "{{controllerName}}", controllerName, -1)
 		f.WriteString(content)
-		// gofmt generated source code
+
+		// Run 'gofmt' on the generated source code
 		formatSourceCode(fpath)
-		ColorLog("[INFO] controller file generated: %s\n", fpath)
+		fmt.Fprintf(w, "\t%s%screate%s\t %s%s\n", "\x1b[32m", "\x1b[1m", "\x1b[21m", fpath, "\x1b[0m")
 	} else {
-		// error creating file
-		ColorLog("[ERRO] Could not create controller file: %s\n", err)
-		os.Exit(2)
+		logger.Fatalf("Could not create controller file: %s", err)
 	}
 }
 
@@ -72,11 +77,12 @@ import (
 	"github.com/astaxie/beego"
 )
 
-// operations for {{controllerName}}
+// {{controllerName}}Controller operations for {{controllerName}}
 type {{controllerName}}Controller struct {
 	beego.Controller
 }
 
+// URLMapping ...
 func (c *{{controllerName}}Controller) URLMapping() {
 	c.Mapping("Post", c.Post)
 	c.Mapping("GetOne", c.GetOne)
@@ -85,7 +91,8 @@ func (c *{{controllerName}}Controller) URLMapping() {
 	c.Mapping("Delete", c.Delete)
 }
 
-// @Title Post
+// Post ...
+// @Title Create
 // @Description create {{controllerName}}
 // @Param	body		body 	models.{{controllerName}}	true		"body for {{controllerName}} content"
 // @Success 201 {object} models.{{controllerName}}
@@ -95,7 +102,8 @@ func (c *{{controllerName}}Controller) Post() {
 
 }
 
-// @Title Get
+// GetOne ...
+// @Title GetOne
 // @Description get {{controllerName}} by id
 // @Param	id		path 	string	true		"The key for staticblock"
 // @Success 200 {object} models.{{controllerName}}
@@ -105,7 +113,8 @@ func (c *{{controllerName}}Controller) GetOne() {
 
 }
 
-// @Title Get All
+// GetAll ...
+// @Title GetAll
 // @Description get {{controllerName}}
 // @Param	query	query	string	false	"Filter. e.g. col1:v1,col2:v2 ..."
 // @Param	fields	query	string	false	"Fields returned. e.g. col1,col2 ..."
@@ -120,7 +129,8 @@ func (c *{{controllerName}}Controller) GetAll() {
 
 }
 
-// @Title Update
+// Put ...
+// @Title Put
 // @Description update the {{controllerName}}
 // @Param	id		path 	string	true		"The id you want to update"
 // @Param	body		body 	models.{{controllerName}}	true		"body for {{controllerName}} content"
@@ -131,6 +141,7 @@ func (c *{{controllerName}}Controller) Put() {
 
 }
 
+// Delete ...
 // @Title Delete
 // @Description delete the {{controllerName}}
 // @Param	id		path 	string	true		"The id you want to delete"
@@ -154,11 +165,12 @@ import (
 	"github.com/astaxie/beego"
 )
 
-// oprations for {{controllerName}}
+//  {{controllerName}}Controller oprations for {{controllerName}}
 type {{controllerName}}Controller struct {
 	beego.Controller
 }
 
+// URLMapping ...
 func (c *{{controllerName}}Controller) URLMapping() {
 	c.Mapping("Post", c.Post)
 	c.Mapping("GetOne", c.GetOne)
@@ -167,6 +179,7 @@ func (c *{{controllerName}}Controller) URLMapping() {
 	c.Mapping("Delete", c.Delete)
 }
 
+// Post ...
 // @Title Post
 // @Description create {{controllerName}}
 // @Param	body		body 	models.{{controllerName}}	true		"body for {{controllerName}} content"
@@ -185,7 +198,8 @@ func (c *{{controllerName}}Controller) Post() {
 	c.ServeJSON()
 }
 
-// @Title Get
+// GetOne ...
+// @Title Get One
 // @Description get {{controllerName}} by id
 // @Param	id		path 	string	true		"The key for staticblock"
 // @Success 200 {object} models.{{controllerName}}
@@ -203,6 +217,7 @@ func (c *{{controllerName}}Controller) GetOne() {
 	c.ServeJSON()
 }
 
+// GetAll ...
 // @Title Get All
 // @Description get {{controllerName}}
 // @Param	query	query	string	false	"Filter. e.g. col1:v1,col2:v2 ..."
@@ -218,9 +233,9 @@ func (c *{{controllerName}}Controller) GetAll() {
 	var fields []string
 	var sortby []string
 	var order []string
-	var query map[string]string = make(map[string]string)
+	var query = make(map[string]string)
 	var limit int64 = 10
-	var offset int64 = 0
+	var offset int64
 
 	// fields: col1,col2,entity.col3
 	if v := c.GetString("fields"); v != "" {
@@ -245,7 +260,7 @@ func (c *{{controllerName}}Controller) GetAll() {
 	// query: k:v,k:v
 	if v := c.GetString("query"); v != "" {
 		for _, cond := range strings.Split(v, ",") {
-			kv := strings.Split(cond, ":")
+			kv := strings.SplitN(cond, ":", 2)
 			if len(kv) != 2 {
 				c.Data["json"] = errors.New("Error: invalid query key/value pair")
 				c.ServeJSON()
@@ -265,7 +280,8 @@ func (c *{{controllerName}}Controller) GetAll() {
 	c.ServeJSON()
 }
 
-// @Title Update
+// Put ...
+// @Title Put
 // @Description update the {{controllerName}}
 // @Param	id		path 	string	true		"The id you want to update"
 // @Param	body		body 	models.{{controllerName}}	true		"body for {{controllerName}} content"
@@ -285,6 +301,7 @@ func (c *{{controllerName}}Controller) Put() {
 	c.ServeJSON()
 }
 
+// Delete ...
 // @Title Delete
 // @Description delete the {{controllerName}}
 // @Param	id		path 	string	true		"The id you want to delete"

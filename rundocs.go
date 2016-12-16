@@ -17,10 +17,9 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+	"strings"
 )
 
 var cmdRundocs = &Command{
@@ -33,8 +32,9 @@ var cmdRundocs = &Command{
 `,
 }
 
-const (
-	swaggerlink = "https://github.com/beego/swagger/archive/v1.zip"
+var (
+	swaggerVersion = "2"
+	swaggerlink    = "https://github.com/beego/swagger/archive/v" + swaggerVersion + ".zip"
 )
 
 type docValue string
@@ -53,64 +53,79 @@ var docport docValue
 
 func init() {
 	cmdRundocs.Run = runDocs
+	cmdRundocs.PreRun = func(cmd *Command, args []string) { ShowShortVersionBanner() }
 	cmdRundocs.Flag.Var(&isDownload, "isDownload", "weather download the Swagger Docs")
 	cmdRundocs.Flag.Var(&docport, "docport", "doc server port")
 }
 
 func runDocs(cmd *Command, args []string) int {
 	if isDownload == "true" {
-		downloadFromUrl(swaggerlink, "swagger.zip")
-		err := unzipAndDelete("swagger.zip", "swagger")
+		downloadFromURL(swaggerlink, "swagger.zip")
+		err := unzipAndDelete("swagger.zip")
 		if err != nil {
-			fmt.Println("has err exet unzipAndDelete", err)
+			logger.Errorf("Error while unzipping 'swagger.zip' file: %s", err)
 		}
 	}
 	if docport == "" {
 		docport = "8089"
 	}
 	if _, err := os.Stat("swagger"); err != nil && os.IsNotExist(err) {
-		fmt.Println("there's no swagger, please use bee rundocs -isDownload=true downlaod first")
-		os.Exit(2)
+		logger.Fatal("No Swagger dist found. Run: bee rundocs -isDownload=true")
 	}
-	fmt.Println("start the docs server on: http://127.0.0.1:" + docport)
-	log.Fatal(http.ListenAndServe(":"+string(docport), http.FileServer(http.Dir("swagger"))))
+
+	logger.Infof("Starting the docs server on: http://127.0.0.1:%s", docport)
+
+	err := http.ListenAndServe(":"+string(docport), http.FileServer(http.Dir("swagger")))
+	if err != nil {
+		logger.Fatalf("%s", err)
+	}
 	return 0
 }
 
-func downloadFromUrl(url, fileName string) {
-	fmt.Println("Downloading", url, "to", fileName)
-
-	output, err := os.Create(fileName)
-	if err != nil {
-		fmt.Println("Error while creating", fileName, "-", err)
+func downloadFromURL(url, fileName string) {
+	var down bool
+	if fd, err := os.Stat(fileName); err != nil && os.IsNotExist(err) {
+		down = true
+	} else if fd.Size() == int64(0) {
+		down = true
+	} else {
+		logger.Infof("'%s' already exists", fileName)
 		return
 	}
-	defer output.Close()
+	if down {
+		logger.Infof("Downloading '%s' to '%s'...", url, fileName)
+		output, err := os.Create(fileName)
+		if err != nil {
+			logger.Errorf("Error while creating '%s': %s", fileName, err)
+			return
+		}
+		defer output.Close()
 
-	response, err := http.Get(url)
-	if err != nil {
-		fmt.Println("Error while downloading", url, "-", err)
-		return
+		response, err := http.Get(url)
+		if err != nil {
+			logger.Errorf("Error while downloading '%s': %s", url, err)
+			return
+		}
+		defer response.Body.Close()
+
+		n, err := io.Copy(output, response.Body)
+		if err != nil {
+			logger.Errorf("Error while downloading '%s': %s", url, err)
+			return
+		}
+		logger.Successf("%d bytes downloaded!", n)
 	}
-	defer response.Body.Close()
-
-	n, err := io.Copy(output, response.Body)
-	if err != nil {
-		fmt.Println("Error while downloading", url, "-", err)
-		return
-	}
-
-	fmt.Println(n, "bytes downloaded.")
 }
 
-func unzipAndDelete(src, dest string) error {
-	fmt.Println("start to unzip file from " + src + " to " + dest)
+func unzipAndDelete(src string) error {
+	logger.Infof("Unzipping '%s'...", src)
 	r, err := zip.OpenReader(src)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
 
+	rp := strings.NewReplacer("swagger-"+swaggerVersion, "swagger")
 	for _, f := range r.File {
 		rc, err := f.Open()
 		if err != nil {
@@ -118,12 +133,12 @@ func unzipAndDelete(src, dest string) error {
 		}
 		defer rc.Close()
 
-		path := filepath.Join(dest, f.Name)
+		fname := rp.Replace(f.Name)
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(path, f.Mode())
+			os.MkdirAll(fname, f.Mode())
 		} else {
 			f, err := os.OpenFile(
-				path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+				fname, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
 			if err != nil {
 				return err
 			}
@@ -135,11 +150,6 @@ func unzipAndDelete(src, dest string) error {
 			}
 		}
 	}
-
-	fmt.Println("Start delete src file " + src)
-	err = os.RemoveAll(src)
-	if err != nil {
-		return err
-	}
-	return nil
+	logger.Successf("Done! Deleting '%s'...", src)
+	return os.RemoveAll(src)
 }
