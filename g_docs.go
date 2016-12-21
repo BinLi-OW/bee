@@ -37,17 +37,17 @@ import (
 )
 
 const (
-	ajson  = "application/json"
-	axml   = "application/xml"
+	ajson = "application/json"
+	axml = "application/xml"
 	aplain = "text/plain"
-	ahtml  = "text/html"
+	ahtml = "text/html"
 )
 
 var pkgCache map[string]struct{} //pkg:controller:function:comments comments: key:value
 var controllerComments map[string]string
 var importlist map[string]string
 var controllerList map[string]map[string]*swagger.Item //controllername Paths items
-var modelsList map[string]map[string]swagger.Schema
+var modelsList map[string]*swagger.Schema
 var rootapi swagger.Swagger
 var astPkgs map[string]*ast.Package
 
@@ -79,7 +79,7 @@ func init() {
 	controllerComments = make(map[string]string)
 	importlist = make(map[string]string)
 	controllerList = make(map[string]map[string]*swagger.Item)
-	modelsList = make(map[string]map[string]swagger.Schema)
+	modelsList = make(map[string]*swagger.Schema)
 	astPkgs = map[string]*ast.Package{}
 }
 
@@ -128,8 +128,8 @@ func parsePackageFromDir(path string) error {
 	}
 
 	pkgKeyPrefix := ""
-	if strings.Index(path, "src") > 0 && strings.Index(path, "src")+4 < len(path){
-		pkgKeyPrefix = path[strings.Index(path, "src")+4:]
+	if strings.Index(path, "src") > 0 && strings.Index(path, "src") + 4 < len(path) {
+		pkgKeyPrefix = path[strings.Index(path, "src") + 4:]
 	}
 
 	isScan := false
@@ -351,7 +351,7 @@ func analyseControllerPkg(localName, pkgpath string) {
 		importlist[localName] = pkgpath
 	} else {
 		pps := strings.Split(pkgpath, "/")
-		importlist[pps[len(pps)-1]] = pkgpath
+		importlist[pps[len(pps) - 1]] = pkgpath
 	}
 	gopath := os.Getenv("GOPATH")
 	if gopath == "" {
@@ -403,7 +403,7 @@ func analyseControllerPkg(localName, pkgpath string) {
 								_ = tp.Struct
 								// Parse controller definition comments
 								if strings.TrimSpace(specDecl.Doc.Text()) != "" {
-									controllerComments[pkgpath+s.(*ast.TypeSpec).Name.String()] = specDecl.Doc.Text()
+									controllerComments[pkgpath + s.(*ast.TypeSpec).Name.String()] = specDecl.Doc.Text()
 								}
 							}
 						}
@@ -499,13 +499,8 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 					} else {
 						m, mod, realTypes := getModel(getRealTypeInFile(schemaName, fl))
 						schema.Ref = "#/definitions/" + m
-						if _, ok := modelsList[pkgpath+controllerName]; !ok {
-							modelsList[pkgpath+controllerName] = make(map[string]swagger.Schema, 0)
-						}
-						modelsList[pkgpath+controllerName][schemaName] = mod
-						if false {
-							appendModels(pkgpath, controllerName, realTypes)
-						}
+						modelsList[m] = &mod
+						appendModels(realTypes)
 					}
 					if isArray {
 						rs.Schema = &swagger.Schema{
@@ -543,19 +538,14 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 				}
 				para.In = p[1]
 				pp := strings.Split(p[2], ".")
-				typ := pp[len(pp)-1]
+				typ := pp[len(pp) - 1]
 				if len(pp) >= 2 {
 					m, mod, realTypes := getModel(getRealTypeInFile(p[2], fl))
 					para.Schema = &swagger.Schema{
 						Ref: "#/definitions/" + m,
 					}
-					if _, ok := modelsList[pkgpath+controllerName]; !ok {
-						modelsList[pkgpath+controllerName] = make(map[string]swagger.Schema, 0)
-					}
-					modelsList[pkgpath+controllerName][typ] = mod
-					if false {
-						appendModels(pkgpath, controllerName, realTypes)
-					}
+					modelsList[m] = &mod
+					appendModels(realTypes)
 				} else {
 					isArray := false
 					paraType := ""
@@ -565,7 +555,7 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 						isArray = true
 					}
 					if typ == "string" || typ == "number" || typ == "integer" || typ == "boolean" ||
-						typ == "array" || typ == "file" {
+					typ == "array" || typ == "file" {
 						paraType = typ
 					} else if sType, ok := basicTypes[typ]; ok {
 						typeFormat := strings.Split(sType, ":")
@@ -605,7 +595,7 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 				for i, s := range st {
 					if unicode.IsSpace(s) {
 						if start {
-							rs.Description = strings.TrimSpace(st[i+1:])
+							rs.Description = strings.TrimSpace(st[i + 1:])
 							break
 						} else {
 							continue
@@ -640,14 +630,14 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 	}
 	if routerPath != "" {
 		var item *swagger.Item
-		if itemList, ok := controllerList[pkgpath+controllerName]; ok {
+		if itemList, ok := controllerList[pkgpath + controllerName]; ok {
 			if it, ok := itemList[routerPath]; !ok {
 				item = &swagger.Item{}
 			} else {
 				item = it
 			}
 		} else {
-			controllerList[pkgpath+controllerName] = make(map[string]*swagger.Item)
+			controllerList[pkgpath + controllerName] = make(map[string]*swagger.Item)
 			item = &swagger.Item{}
 		}
 		switch HTTPMethod {
@@ -666,7 +656,7 @@ func parserComments(comments *ast.CommentGroup, funcName, controllerName, pkgpat
 		case "OPTIONS":
 			item.Options = &opts
 		}
-		controllerList[pkgpath+controllerName][routerPath] = item
+		controllerList[pkgpath + controllerName][routerPath] = item
 	}
 	return nil
 }
@@ -726,7 +716,7 @@ func getRealTypeInFile(modelName string, fl *ast.File) string {
 			imptPath := strings.Replace(impt.Path.Value, `"`, "", -1)
 			imptPaths := strings.Split(imptPath, "/")
 
-			if imptPaths[len(imptPaths)-1] == modelPkgName {
+			if imptPaths[len(imptPaths) - 1] == modelPkgName {
 				imptPaths = append(imptPaths, strings.Split(modelName, ".")[1])
 				return strings.Join(imptPaths, ".")
 			}
@@ -739,10 +729,10 @@ func getRealTypeInFile(modelName string, fl *ast.File) string {
 	return fmt.Sprintf("%s.%s", strings.Replace(filePath, "/", ".", -1), modelName)
 }
 
-func getModel(str string) (objectname string, m swagger.Schema, realTypes []string) {
+func getModel(str string) (objectname string, m swagger.Schema, realTypes []*realTypeObj) {
 	strs := strings.Split(str, ".")
-	objectname = strs[len(strs)-1]
-	objPackagePath := strings.Join(strs[0:len(strs)-1], "/")
+	objectname = strs[len(strs) - 1]
+	objPackagePath := strings.Join(strs[0:len(strs) - 1], "/")
 
 	m.Type = "object"
 	for pkgPath, pkg := range astPkgs {
@@ -775,8 +765,7 @@ func getModel(str string) (objectname string, m swagger.Schema, realTypes []stri
 	return
 }
 
-func parseObject(d *ast.Object, k string, m *swagger.Schema, realTypes *[]string,
-			isRoot bool, currentFile *ast.File) {
+func parseObject(d *ast.Object, k string, m *swagger.Schema, realTypes *[]*realTypeObj, isRoot bool, currentFile *ast.File) {
 	ts, ok := d.Decl.(*ast.TypeSpec)
 	if !ok {
 		logger.Fatalf("Unknown type without TypeSec: %v\n", d)
@@ -797,7 +786,7 @@ func parseObject(d *ast.Object, k string, m *swagger.Schema, realTypes *[]string
 		for _, field := range st.Fields.List {
 			realType := ""
 			isSlice, realType, sType := typeAnalyser(field, currentFile)
-			*realTypes = append(*realTypes, realType)
+			*realTypes = append(*realTypes, &realTypeObj{realTypeName: realType, inFile: currentFile})
 			mp := swagger.Propertie{}
 			if isSlice {
 				mp.Type = "array"
@@ -933,8 +922,8 @@ func typeAnalyser(f *ast.Field, fl *ast.File) (isSlice bool, realType, swaggerTy
 
 func getObjAndFileByModelRealType(modelRealType string) (*ast.Object, *ast.File) {
 	strs := strings.Split(modelRealType, ".")
-	modelPkgPath := strings.Join(strs[0:len(strs)-1], "/")
-	modelName := strs[len(strs)-1]
+	modelPkgPath := strings.Join(strs[0:len(strs) - 1], "/")
+	modelName := strs[len(strs) - 1]
 
 	for pkgPath, pkg := range astPkgs {
 		if pkgPath != modelPkgPath {
@@ -981,17 +970,24 @@ func grepJSONTag(tag string) string {
 	return ""
 }
 
+type realTypeObj struct {
+	realTypeName string
+	inFile       *ast.File
+}
+
 // append models
-func appendModels(pkgpath, controllerName string, realTypes []string) {
+func appendModels(realTypes []*realTypeObj) {
 	for _, realType := range realTypes {
-		if realType != "" && !isBasicType(strings.TrimLeft(realType, "[]")) &&
-			!strings.HasPrefix(realType, "map") && !strings.HasPrefix(realType, "&") {
-			if _, ok := modelsList[pkgpath+controllerName][realType]; ok {
+		if realType.realTypeName != "" && !isBasicType(strings.TrimLeft(realType.realTypeName, "[]")) &&
+		!strings.HasPrefix(realType.realTypeName, "map") && !strings.HasPrefix(realType.realTypeName, "&") {
+
+			if modelsList[realType.realTypeName] != nil {
 				continue
 			}
-			_, mod, newRealTypes := getModel(realType)
-			modelsList[pkgpath+controllerName][realType] = mod
-			appendModels(pkgpath, controllerName, newRealTypes)
+			_, mod, newRealTypes := getModel(realType.realTypeName)
+			modelsList[realType.realTypeName] = &mod
+			appendModels(newRealTypes)
+
 		}
 	}
 }
